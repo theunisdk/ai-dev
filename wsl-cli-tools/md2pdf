@@ -1,0 +1,77 @@
+#!/bin/bash
+
+# Check if pandoc is installed
+if ! command -v pandoc &> /dev/null; then
+    echo "Error: pandoc is not installed."
+    echo "Please install it with: sudo apt-get install pandoc"
+    exit 1
+fi
+
+# Check if a LaTeX engine is installed (needed for PDF output)
+if ! command -v pdflatex &> /dev/null && ! command -v xelatex &> /dev/null; then
+    echo "Error: No LaTeX engine found. At least one of pdflatex or xelatex is required."
+    echo "Please install it with: sudo apt-get install texlive-latex-base"
+    echo "  or for full support:  sudo apt-get install texlive"
+    exit 1
+fi
+
+# Check if an argument was provided
+if [ $# -eq 0 ]; then
+    echo "Usage: $0 <file.md|directory>"
+    echo "Example: $0 document.md"
+    echo "Example: $0 /path/to/markdown/files"
+    exit 1
+fi
+
+TARGET="$1"
+
+convert_md() {
+    local file="$1"
+    local base=$(basename "$file" .md)
+    local output="${file%.md}.pdf"
+
+    echo "Converting: $file -> $output"
+
+    # Convert markdown to PDF using pandoc (try multiple engines)
+    if pandoc "$file" -o "$output" --pdf-engine=pdflatex -V geometry:margin=0.5in 2>/dev/null || \
+       pandoc "$file" -o "$output" --pdf-engine=xelatex -V geometry:margin=0.5in 2>/dev/null || \
+       pandoc "$file" -o "$output" 2>/dev/null; then
+        echo "✓ Successfully converted: $base.md"
+        return 0
+    else
+        echo "✗ Failed to convert: $base.md"
+        return 1
+    fi
+}
+
+# Check if target is a file
+if [ -f "$TARGET" ]; then
+    # Verify it's a markdown file
+    if [[ "$TARGET" != *.md ]]; then
+        echo "Error: '$TARGET' is not a markdown file."
+        exit 1
+    fi
+    convert_md "$TARGET"
+    echo "Conversion complete!"
+    exit 0
+fi
+
+# Check if target is a directory
+if [ -d "$TARGET" ]; then
+    echo "Converting markdown files in: $TARGET"
+    count=0
+
+    # Find all .md files and convert them
+    while IFS= read -r -d '' file; do
+        if convert_md "$file"; then
+            ((count++))
+        fi
+    done < <(find "$TARGET" -maxdepth 1 -name "*.md" -type f -print0)
+
+    echo "Conversion complete! Converted $count file(s)."
+    exit 0
+fi
+
+# Target doesn't exist
+echo "Error: '$TARGET' is not a valid file or directory."
+exit 1

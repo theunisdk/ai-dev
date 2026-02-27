@@ -1,0 +1,100 @@
+#!/bin/bash
+# Setup or update .claude/settings.local.json with standard permissions
+
+CLAUDE_DIR=".claude"
+SETTINGS_FILE="$CLAUDE_DIR/settings.local.json"
+CLAUDE_MD="CLAUDE.md"
+
+# Standard permissions to ensure are present
+STANDARD_PERMISSIONS=(
+  "Bash(npm install:*)"
+  "Bash(mkdir:*)"
+  "Bash(npm uninstall:*)"
+  "Bash(curl:*)"
+  "Bash(grep:*)"
+  "Bash(ls:*)"
+  "Bash(rg:*)"
+  "Bash(find:*)"
+  "Bash(git add:*)"
+  "Bash(tree:*)"
+  "Bash(cat:*)"
+  "Bash(mv:*)"
+  "Bash(awk:*)"
+  "Bash(npx tsc:*)"
+)
+
+# Default CLAUDE.md content
+DEFAULT_CLAUDE_MD="# Project Guidelines
+
+- Documents go in a docs subfolder.
+- Scripts go in a scripts subfolder.
+- Test scripts go into test-scripts subfolder.
+- Prefer pnpm over npm.
+- Prefer doppler over .env files.
+"
+
+# Create .claude directory if it doesn't exist
+if [ ! -d "$CLAUDE_DIR" ]; then
+  mkdir -p "$CLAUDE_DIR"
+  echo "Created $CLAUDE_DIR directory"
+fi
+
+# Check if jq is available
+if ! command -v jq &> /dev/null; then
+  echo "Error: jq is required but not found. Please install jq to use this script."
+  exit 1
+fi
+
+# Use jq to merge permissions
+if [ -f "$SETTINGS_FILE" ]; then
+  echo "Updating existing $SETTINGS_FILE..."
+  
+  # Read existing permissions
+  existing_permissions=$(jq -r '.permissions.allow[]?' "$SETTINGS_FILE" 2>/dev/null || echo "")
+  
+  # Merge permissions: combine existing and standard, remove duplicates
+  all_permissions=("${STANDARD_PERMISSIONS[@]}")
+  while IFS= read -r perm; do
+    if [ -n "$perm" ]; then
+      # Check if permission already exists in standard list
+      found=false
+      for std_perm in "${STANDARD_PERMISSIONS[@]}"; do
+        if [ "$perm" = "$std_perm" ]; then
+          found=true
+          break
+        fi
+      done
+      # Add if not found in standard list
+      if [ "$found" = false ]; then
+        all_permissions+=("$perm")
+      fi
+    fi
+  done <<< "$existing_permissions"
+  
+  # Create new JSON structure
+  jq -n \
+    --argjson allow "$(printf '%s\n' "${all_permissions[@]}" | jq -R . | jq -s .)" \
+    '{permissions: {allow: $allow, deny: []}}' > "$SETTINGS_FILE.tmp" && mv "$SETTINGS_FILE.tmp" "$SETTINGS_FILE"
+  
+  echo "Updated $SETTINGS_FILE with merged permissions"
+else
+  echo "Creating new $SETTINGS_FILE..."
+  # Create new file with standard permissions
+  jq -n \
+    --argjson allow "$(printf '%s\n' "${STANDARD_PERMISSIONS[@]}" | jq -R . | jq -s .)" \
+    '{permissions: {allow: $allow, deny: []}}' > "$SETTINGS_FILE"
+  
+  echo "Created $SETTINGS_FILE with standard permissions"
+fi
+
+echo "Done!"
+
+# Handle CLAUDE.md file
+if [ -f "$CLAUDE_MD" ]; then
+  echo "CLAUDE.md already exists, skipping creation"
+else
+  echo "Creating $CLAUDE_MD..."
+  echo "$DEFAULT_CLAUDE_MD" > "$CLAUDE_MD"
+  echo "Created $CLAUDE_MD with default guidelines"
+fi
+

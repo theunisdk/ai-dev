@@ -1,0 +1,68 @@
+#!/bin/bash
+
+# Check if pdftotext is installed (from poppler-utils)
+if ! command -v pdftotext &> /dev/null; then
+    echo "Error: pdftotext is not installed."
+    echo "Please install it with: sudo apt-get install poppler-utils"
+    exit 1
+fi
+
+# Check if an argument was provided
+if [ $# -eq 0 ]; then
+    echo "Usage: $0 <file.pdf|directory>"
+    echo "Example: $0 document.pdf"
+    echo "Example: $0 /path/to/pdf/files"
+    exit 1
+fi
+
+TARGET="$1"
+
+convert_pdf() {
+    local file="$1"
+    local base=$(basename "$file" .pdf)
+    local dir=$(dirname "$file")
+    local output="$dir/$base.md"
+
+    echo "Converting: $file -> $output"
+
+    if pdftotext -layout "$file" - | sed 's/^//' > "$output" 2>/dev/null; then
+        echo "✓ Successfully converted: $base.pdf"
+        return 0
+    else
+        echo "✗ Failed to convert: $base.pdf"
+        rm -f "$output"
+        return 1
+    fi
+}
+
+# Check if target is a file
+if [ -f "$TARGET" ]; then
+    # Verify it's a PDF file
+    if [[ "$TARGET" != *.pdf ]]; then
+        echo "Error: '$TARGET' is not a PDF file."
+        exit 1
+    fi
+    convert_pdf "$TARGET"
+    echo "Conversion complete!"
+    exit 0
+fi
+
+# Check if target is a directory
+if [ -d "$TARGET" ]; then
+    echo "Converting PDF files in: $TARGET"
+    count=0
+
+    # Find all .pdf files and convert them
+    while IFS= read -r -d '' file; do
+        if convert_pdf "$file"; then
+            ((count++))
+        fi
+    done < <(find "$TARGET" -maxdepth 1 -name "*.pdf" -type f -print0)
+
+    echo "Conversion complete! Converted $count file(s)."
+    exit 0
+fi
+
+# Target doesn't exist
+echo "Error: '$TARGET' is not a valid file or directory."
+exit 1

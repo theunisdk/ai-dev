@@ -1,0 +1,15 @@
+#!/bin/bash
+# Clean Zone.Identifier files created by copying from Windows to WSL
+
+# Find and delete all Zone.Identifier files in current directory and subdirectories
+found=$(find . -name "*:Zone.Identifier" -type f)
+
+if [ -z "$found" ]; then
+    echo "No Zone.Identifier files found."
+else
+    echo "Found Zone.Identifier files:"
+    echo "$found"
+    echo ""
+    find . -name "*:Zone.Identifier" -type f -delete
+    echo "Cleanup complete!"
+fi

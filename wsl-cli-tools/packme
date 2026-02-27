@@ -1,0 +1,112 @@
+#!/bin/bash
+
+# Check if package.json exists in current directory
+if [ ! -f "package.json" ]; then
+    echo "Error: No package.json found in current directory"
+    exit 1
+fi
+
+# Detect package manager
+if [ -f "pnpm-lock.yaml" ]; then
+    PKG_MANAGER="pnpm"
+elif [ -f "package-lock.json" ]; then
+    PKG_MANAGER="npm"
+elif [ -f "yarn.lock" ]; then
+    PKG_MANAGER="yarn"
+else
+    # Default to npm if no lock file found
+    PKG_MANAGER="npm"
+fi
+
+echo "Using package manager: $PKG_MANAGER"
+echo ""
+
+# Check if jq is installed for JSON parsing
+if ! command -v jq &> /dev/null; then
+    echo "Error: jq is required but not installed. Install it with: sudo apt install jq"
+    exit 1
+fi
+
+# Extract scripts from package.json (sorted alphabetically, case-insensitive, by script name)
+scripts=$(jq -r '.scripts | to_entries | sort_by(.key | ascii_downcase) | .[] | .key + " → " + .value' package.json 2>/dev/null)
+
+if [ -z "$scripts" ]; then
+    echo "No scripts found in package.json"
+    exit 1
+fi
+
+# Convert scripts to array
+readarray -t script_array <<< "$scripts"
+
+# Interactive menu
+echo "Select a script to run:"
+echo ""
+
+# Get selection
+selected=0
+
+# Function to display menu
+display_menu() {
+    # Move cursor to beginning of menu
+    tput cuu $(( ${#script_array[@]} ))
+    
+    # Display scripts with selection indicator
+    for i in "${!script_array[@]}"; do
+        # Clear the line first
+        echo -ne "\033[2K"
+        
+        if [ $i -eq $selected ]; then
+            echo -e "\033[1;32m→ $((i+1))) ${script_array[$i]}\033[0m"
+        else
+            echo "  $((i+1))) ${script_array[$i]}"
+        fi
+    done
+}
+
+# Initial display
+for i in "${!script_array[@]}"; do
+    if [ $i -eq $selected ]; then
+        echo -e "\033[1;32m→ $((i+1))) ${script_array[$i]}\033[0m"
+    else
+        echo "  $((i+1))) ${script_array[$i]}"
+    fi
+done
+
+while true; do
+    # Read single character
+    read -rsn1 key
+    
+    # Handle arrow keys
+    if [[ $key == $'\x1b' ]]; then
+        read -rsn2 key
+        case $key in
+            '[A')  # Up arrow
+                ((selected--))
+                if [ $selected -lt 0 ]; then
+                    selected=$((${#script_array[@]} - 1))
+                fi
+                display_menu
+                ;;
+            '[B')  # Down arrow
+                ((selected++))
+                if [ $selected -ge ${#script_array[@]} ]; then
+                    selected=0
+                fi
+                display_menu
+                ;;
+        esac
+    elif [[ $key == "" ]]; then  # Enter key
+        break
+    fi
+done
+
+echo ""
+
+# Extract script name from selected option (split on arrow)
+script_name=$(echo "${script_array[$selected]}" | awk -F " → " '{print $1}')
+
+echo "Running: $PKG_MANAGER run $script_name"
+echo ""
+
+# Run the selected script
+$PKG_MANAGER run "$script_name"
