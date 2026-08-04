@@ -1,0 +1,50 @@
+# NLDR PR Docs — auto-update project documentation on pull requests.
+# Requires: ANTHROPIC_API_KEY repo secret, and the nldr-pr-docs skill vendored
+# at .claude/skills/nldr-pr-docs/SKILL.md (see the nldr-setup-docs-ci skill).
+name: nldr-pr-docs
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+concurrency:
+  group: nldr-pr-docs-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  update-docs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0 # full history so the base...head diff is available
+
+      # Skip runs triggered by this workflow's own doc commit (belt-and-braces;
+      # the skill is also idempotent and won't re-commit when docs are in sync).
+      - id: guard
+        name: Skip if head commit is our own docs commit
+        run: |
+          msg="$(git log -1 --pretty=%s)"
+          if [[ "$msg" == docs:* ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Head commit is a docs commit — skipping."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.guard.outputs.skip == 'false'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Run the nldr-pr-docs skill (.claude/skills/nldr-pr-docs/SKILL.md) on this
+            pull request. The base branch is ${{ github.event.pull_request.base.ref }}.
+            Assess the diff's documentation impact, apply any needed doc updates,
+            commit them to this branch, and finish with a summary of what changed
+            (or why nothing needed to change).
+          claude_args: |
+            --allowedTools "Read,Glob,Grep,Write,Edit,Bash(git diff:*),Bash(git log:*),Bash(git status:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*)"
