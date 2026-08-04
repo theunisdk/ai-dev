@@ -16,11 +16,11 @@ Documentation is for AI-assisted development. AI reads code, so docs capture wha
 - Where things live
 - Conventions that aren't obvious from any single file
 
-Do NOT include code examples, implementation details, or API usage — reference file locations instead ("Auth logic: `src/services/auth.ts`").
+Do NOT include code examples, implementation details, or API usage in `docs/` — reference file locations instead ("Auth logic: `src/services/auth.ts`"). This rule applies to `docs/`; the README's quick-start commands are normal readme content and stay.
 
 ## When NOT to use
 
-If the project has 15+ tables/collections, multiple distinct domains (auth, billing, jobs, integrations…), or an implicit database schema scattered across many files — recommend `nldr-gen-docs` (full) instead, and say why. Let the user decide.
+Signals the project needs `nldr-gen-docs` (full) instead: 15+ tables/collections; multiple distinct domains (auth, billing, jobs, integrations…); an implicit database schema scattered across many files; or an existing per-system/per-table docs tree that is accurate and actively useful. On any of these, recommend full and say why — let the user decide.
 
 ## Output: exactly two files
 
@@ -64,14 +64,23 @@ The `docs-level: light` frontmatter marker is REQUIRED — `nldr-update-docs` an
 
 ## The implicit-contract rule
 
-Even in light mode: **if a data contract exists only implicitly in code, write it down.** Examples: JSONB/metadata blob shapes, Firestore/Mongo collection structures with no schema file, message formats between services. Add a short "Data Contracts" section to INDEX.md for these. If the schema is explicit (Prisma/Drizzle/SQL/Convex schema file), just point to that file — don't duplicate it.
+Even in light mode: **if a data contract exists only implicitly in code, write it down.** Examples: JSONB/metadata blob shapes, Firestore/Mongo collection structures with no schema file, message formats between services. Add a short "Data Contracts" section to INDEX.md for these. If the schema is explicit (Prisma/Drizzle/SQL/Convex schema file), just point to that file — don't duplicate it. If the schema lives in a different repo, point there ("Schema source of truth: `~/dev/org/db-repo`").
+
+## Pre-existing docs
+
+If a `docs/` folder already exists with more than INDEX.md:
+
+1. Fold still-accurate content into the new INDEX.md (it's a consolidation, not a from-scratch write).
+2. List the superseded doc files and propose deleting them (or moving to `docs/archive/` if the user prefers). Get confirmation before deleting.
+3. Do NOT silently leave two competing doc sets — a light INDEX plus a stale detailed tree is worse than either alone.
 
 ## Process
 
-1. Scan the repo: structure, entry points, schema/model files, tests, CI config.
-2. Write both files. Target: `docs/INDEX.md` readable in one pass (~150–250 lines).
+1. Scan the repo: structure, entry points, schema/model files, tests, CI config, existing docs.
+2. Write both files. `docs/INDEX.md` should be readable in one pass — roughly 150–250 wrapped lines as a ceiling, not a quota. Shorter is better than padded.
 3. Verify every file path referenced actually exists.
-4. Commit with a descriptive message.
+4. Handle pre-existing docs (section above).
+5. Commit with a descriptive message.
 
 ## Common mistakes
 

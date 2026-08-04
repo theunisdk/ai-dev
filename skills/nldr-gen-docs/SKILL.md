@@ -16,7 +16,7 @@ Documentation is for AI-assisted development. AI reads code, so document what co
 - **Data relationships and flows** — how information moves
 - **Behavioral expectations** — what should happen in various scenarios
 
-Do NOT include code examples, implementation tutorials, or API usage patterns. Reference file locations instead ("Auth logic: `src/services/auth.ts`").
+Do NOT include code examples, implementation tutorials, or API usage patterns in `docs/`. Reference file locations instead ("Auth logic: `src/services/auth.ts`"). This applies to `docs/`; the README's quick-start commands are normal readme content and stay.
 
 ## When NOT to use
 
@@ -33,6 +33,8 @@ The data layer treatment depends on where the schema lives:
 | **Mixed** — explicit schema with implicit JSONB/metadata blobs | Point to the schema file; document only the implicit blob shapes and the write-ownership layer. |
 
 The semantics are often implicit even when the schema is explicit. Write-ownership is the highest-value doc a schema file can't provide.
+
+If the schema lives in a different repo, treat it as explicit: point to that repo as the source of truth and don't duplicate it here.
 
 ## Output structure
 
@@ -86,6 +88,14 @@ Per-collection docs additionally: field descriptions with business meaning, rela
 6. **Code quality** (for improvements.md) — security issues, deprecated deps, test coverage, anti-patterns (async forEach, race conditions).
 
 Document each system completely before moving to the next.
+
+## Pre-existing docs
+
+If docs already exist (any structure — an old docs tree, scattered markdown, historical spec/plan folders):
+
+1. Fold still-accurate content into the new structure rather than writing from scratch.
+2. Propose deleting or archiving (`docs/archive/`) superseded files — get confirmation before deleting.
+3. Historical artifacts (design specs, plans) are not reference docs: leave them where they are and exclude them from INDEX navigation, or link them under a single "History" entry.
 
 ## Delivery
 
