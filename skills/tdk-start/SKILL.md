@@ -14,4 +14,4 @@ Then, before proceeding with any other work:
 
 1. Read `README.md` in the current working directory.
 2. Read `docs/INDEX.md` if it exists.
-3. Ask whether to branch off `dev` before starting.
+3. Unless there are uncommited changes, branch off main to start.

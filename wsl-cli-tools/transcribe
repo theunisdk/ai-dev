@@ -1,12 +1,63 @@
 #!/bin/bash
-# Transcribe audio files to text using OpenAI Whisper API
+# Transcribe audio files to text using the OpenAI speech-to-text API
 
 set -e
 
+DEFAULT_MODEL="gpt-transcribe"
+FALLBACK_MODEL="gpt-4o-transcribe"
+
+usage() {
+    echo "Usage: transcribe [options] <audio_file> <output_file>"
+    echo ""
+    echo "Options:"
+    echo "  -l, --language <code>  ISO-639-1 language of the audio (default: ${TRANSCRIBE_LANGUAGE:-en})."
+    echo "                         Use 'auto' to let the API detect it (not recommended:"
+    echo "                         accented English is often misdetected and translated)."
+    echo "  -m, --model <name>     Transcription model (default: ${TRANSCRIBE_MODEL:-$DEFAULT_MODEL})."
+    echo "                         Alternatives: gpt-4o-transcribe, gpt-4o-transcribe-diarize,"
+    echo "                         gpt-4o-mini-transcribe, whisper-1"
+    echo "  -b, --bitrate <rate>   Opus bitrate for the working copy (default: ${TRANSCRIBE_BITRATE:-24k})."
+    echo "                         Raise it (e.g. 48k) only for noisy or multi-mic audio."
+    echo ""
+    echo "If the default model is not enabled on your project, the script falls back to"
+    echo "$FALLBACK_MODEL and says so. An explicitly chosen -m model is never substituted."
+    echo ""
+    echo "Example: transcribe audio.m4a convo.txt"
+    echo "Example: transcribe -m whisper-1 -l af audio.m4a convo.txt"
+}
+
+LANGUAGE="${TRANSCRIBE_LANGUAGE:-en}"
+MODEL="${TRANSCRIBE_MODEL:-$DEFAULT_MODEL}"
+BITRATE="${TRANSCRIBE_BITRATE:-24k}"
+# Only auto-substitute a model the user did not ask for by name.
+MODEL_EXPLICIT=false
+[ -n "$TRANSCRIBE_MODEL" ] && MODEL_EXPLICIT=true
+POSITIONAL=()
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -l|--language)
+            [ -z "$2" ] && { echo "Error: $1 requires a value."; exit 1; }
+            LANGUAGE="$2"; shift 2 ;;
+        -m|--model)
+            [ -z "$2" ] && { echo "Error: $1 requires a value."; exit 1; }
+            MODEL="$2"; MODEL_EXPLICIT=true; shift 2 ;;
+        -b|--bitrate)
+            [ -z "$2" ] && { echo "Error: $1 requires a value."; exit 1; }
+            BITRATE="$2"; shift 2 ;;
+        -h|--help)
+            usage; exit 0 ;;
+        -*)
+            echo "Error: unknown option '$1'"; echo ""; usage; exit 1 ;;
+        *)
+            POSITIONAL+=("$1"); shift ;;
+    esac
+done
+set -- "${POSITIONAL[@]}"
+
 # Check if required arguments are provided
 if [ $# -lt 2 ]; then
-    echo "Usage: transcribe <audio_file> <output_file>"
-    echo "Example: transcribe audio.m4a convo.txt"
+    usage
     exit 1
 fi
 
@@ -15,6 +66,55 @@ OUTPUT_FILE="$2"
 TEMP_FILE=""
 TEMP_CHUNKS=()
 MAX_SIZE_MB=24
+
+# The API auto-detects language from only the first ~30s of each request. On
+# accented or code-switched English that regularly lands on the wrong language,
+# and the result is a translation rather than a transcript. Pin it unless the
+# caller explicitly asks for detection.
+LANG_ARGS=()
+if [ "${LANGUAGE,,}" != "auto" ]; then
+    LANG_ARGS=(-F "language=$LANGUAGE")
+fi
+
+# POST one audio file. Sets http_status and response_body.
+post_audio() {
+    local raw
+    raw=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "https://api.openai.com/v1/audio/transcriptions" \
+        -H "Authorization: Bearer $OPENAI_API_KEY" \
+        -F "file=@$1" \
+        -F "model=$MODEL" \
+        "${LANG_ARGS[@]}" \
+        -F "response_format=json")
+    http_status=$(echo "$raw" | grep "HTTP_STATUS:" | cut -d: -f2)
+    response_body=$(echo "$raw" | sed '/HTTP_STATUS:/d')
+}
+
+# gpt-transcribe is still rolling out, and entitlement is decided per request:
+# the same key can be accepted and then rejected minutes later. Settle on one
+# model BEFORE transcribing, using a throwaway clip, so every chunk of a file is
+# transcribed by the same model and a long run cannot die partway through.
+# An explicitly requested model is never substituted.
+select_model() {
+    [ "$MODEL_EXPLICIT" = true ] && return 0
+
+    local probe
+    probe=$(mktemp --suffix=.mp3)
+    if ! ffmpeg -f lavfi -i anullsrc=r=16000:cl=mono -t 1 -acodec libmp3lame \
+         "$probe" -y -loglevel error 2>/dev/null; then
+        rm -f "$probe"
+        return 0   # cannot probe; let the real request report any failure
+    fi
+
+    post_audio "$probe"
+    rm -f "$probe"
+
+    if [ "$http_status" != "200" ] && echo "$response_body" | grep -q "does not have access to model"; then
+        echo "Note: '$MODEL' is not enabled on this project yet (it is still rolling out)."
+        echo "      Using '$FALLBACK_MODEL' for this run. Override anytime with -m."
+        echo ""
+        MODEL="$FALLBACK_MODEL"
+    fi
+}
 
 # Check if audio file exists
 if [ ! -f "$AUDIO_FILE" ]; then
@@ -55,12 +155,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Convert to mp3 if not already mp3
+# Settle the model before the (potentially very slow) conversion.
+select_model
+
+# Per-request duration cap. The gpt-* models reject anything over 1400s; stay a
+# little under it so rounding in the split cannot land on the boundary.
+# whisper-1 has no duration cap, only the 25MB size limit.
+case "$MODEL" in
+    whisper-1) MAX_DURATION_S=0 ;;
+    *)         MAX_DURATION_S=1380 ;;
+esac
+
+# Re-encode to 24kbps mono Opus at 16kHz. The models downsample to 16kHz mono
+# internally, so anything richer is discarded — but it inflates the file and
+# forces the 25MB API limit to split it. Every split lands mid-sentence and
+# destroys the word straddling it. At this bitrate a 100-minute recording fits
+# in a single request. Measured against a 192kbps encode of the same audio, the
+# only differences were words that are genuinely ambiguous in the source.
 FILE_EXT="${AUDIO_FILE##*.}"
-if [ "${FILE_EXT,,}" != "mp3" ]; then
-    echo "Converting '$AUDIO_FILE' to mp3..."
-    TEMP_FILE=$(mktemp --suffix=.mp3)
-    ffmpeg -i "$AUDIO_FILE" -acodec libmp3lame -ab 192k "$TEMP_FILE" -y -loglevel warning
+if [ "${FILE_EXT,,}" != "ogg" ] && [ "${FILE_EXT,,}" != "oga" ] && [ "${FILE_EXT,,}" != "opus" ]; then
+    echo "Converting '$AUDIO_FILE' to 24kbps mono Opus..."
+    TEMP_FILE=$(mktemp --suffix=.ogg)
+    ffmpeg -i "$AUDIO_FILE" -vn -ac 1 -ar 16000 -c:a libopus -b:a "$BITRATE" \
+        "$TEMP_FILE" -y -loglevel warning
     AUDIO_FILE="$TEMP_FILE"
     echo "Conversion complete."
     echo ""
@@ -76,28 +193,43 @@ if [ ! -f "$AUDIO_FILE" ]; then
 fi
 
 echo "Using file: $AUDIO_FILE"
+echo "Model: $MODEL | Language: $LANGUAGE"
 FILE_SIZE_MB=$(du -m "$AUDIO_FILE" | cut -f1)
 echo "File size: $(du -h "$AUDIO_FILE" | cut -f1) (${FILE_SIZE_MB}MB)"
 echo ""
 
-# Check if file needs to be split
-if [ "$FILE_SIZE_MB" -gt "$MAX_SIZE_MB" ]; then
-    echo "File exceeds ${MAX_SIZE_MB}MB limit. Splitting into chunks..."
+DURATION=$(ffmpeg -i "$AUDIO_FILE" 2>&1 | grep "Duration" | awk '{print $2}' | tr -d , | awk -F: '{print ($1 * 3600) + ($2 * 60) + $3}')
+DURATION_INT=${DURATION%.*}
+
+if [ -z "$DURATION_INT" ] || [ "$DURATION_INT" -eq 0 ]; then
+    echo "Error: Could not determine audio duration"
+    exit 1
+fi
+
+# Two independent API limits apply, and either one can force a split:
+#   size     - 25MB for every model
+#   duration - 1400s on the gpt-* models; whisper-1 has no duration cap
+# Low-bitrate audio makes the size limit easy to satisfy, which leaves duration
+# as the binding constraint. Splitting on size alone silently produces requests
+# that are small but too long, and the API rejects them as "corrupted".
+CHUNKS_BY_SIZE=$(( (FILE_SIZE_MB + MAX_SIZE_MB - 1) / MAX_SIZE_MB ))
+CHUNKS_BY_TIME=1
+if [ "$MAX_DURATION_S" -gt 0 ]; then
+    CHUNKS_BY_TIME=$(( (DURATION_INT + MAX_DURATION_S - 1) / MAX_DURATION_S ))
+fi
+
+CHUNKS_NEEDED=$CHUNKS_BY_SIZE
+[ "$CHUNKS_BY_TIME" -gt "$CHUNKS_NEEDED" ] && CHUNKS_NEEDED=$CHUNKS_BY_TIME
+
+if [ "$CHUNKS_NEEDED" -gt 1 ]; then
+    if [ "$CHUNKS_BY_TIME" -ge "$CHUNKS_BY_SIZE" ]; then
+        echo "Audio is ${DURATION_INT}s; $MODEL accepts ${MAX_DURATION_S}s per request. Splitting..."
+    else
+        echo "File exceeds ${MAX_SIZE_MB}MB limit. Splitting into chunks..."
+    fi
     echo ""
 
-    # Get duration in seconds
-    echo "Analyzing audio duration..."
-    DURATION=$(ffmpeg -i "$AUDIO_FILE" 2>&1 | grep "Duration" | awk '{print $2}' | tr -d , | awk -F: '{print ($1 * 3600) + ($2 * 60) + $3}')
-    DURATION_INT=${DURATION%.*}
-
-    if [ -z "$DURATION_INT" ] || [ "$DURATION_INT" -eq 0 ]; then
-        echo "Error: Could not determine audio duration"
-        exit 1
-    fi
-
-    # Calculate chunk duration to keep each chunk under MAX_SIZE_MB
-    CHUNKS_NEEDED=$(( (FILE_SIZE_MB + MAX_SIZE_MB - 1) / MAX_SIZE_MB ))
-    CHUNK_DURATION=$(( DURATION_INT / CHUNKS_NEEDED ))
+    CHUNK_DURATION=$(( DURATION_INT / CHUNKS_NEEDED + 1 ))
 
     echo "Total duration: ${DURATION_INT}s, splitting into $CHUNKS_NEEDED chunks of ~${CHUNK_DURATION}s each"
     echo ""
@@ -105,7 +237,7 @@ if [ "$FILE_SIZE_MB" -gt "$MAX_SIZE_MB" ]; then
     # Split the file
     for i in $(seq 0 $((CHUNKS_NEEDED - 1))); do
         START_TIME=$((i * CHUNK_DURATION))
-        CHUNK_FILE=$(mktemp --suffix=.mp3)
+        CHUNK_FILE=$(mktemp --suffix=.ogg)
         TEMP_CHUNKS+=("$CHUNK_FILE")
 
         echo "Creating chunk $((i + 1))/$CHUNKS_NEEDED (starting at ${START_TIME}s)..."
@@ -120,14 +252,7 @@ if [ "$FILE_SIZE_MB" -gt "$MAX_SIZE_MB" ]; then
         CHUNK_SIZE=$(du -h "$CHUNK" | cut -f1)
         echo "Transcribing chunk $((i + 1))/${#TEMP_CHUNKS[@]} (size: $CHUNK_SIZE)..."
 
-        response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "https://api.openai.com/v1/audio/transcriptions" \
-            -H "Authorization: Bearer $OPENAI_API_KEY" \
-            -F "file=@$CHUNK" \
-            -F "model=whisper-1" \
-            -F "response_format=json")
-
-        http_status=$(echo "$response" | grep "HTTP_STATUS:" | cut -d: -f2)
-        response_body=$(echo "$response" | sed '/HTTP_STATUS:/d')
+        post_audio "$CHUNK"
 
         echo "DEBUG: HTTP Status = $http_status"
         echo "DEBUG: Response body length = ${#response_body}"
@@ -163,14 +288,7 @@ if [ "$FILE_SIZE_MB" -gt "$MAX_SIZE_MB" ]; then
 else
     # File is small enough, transcribe directly
     echo "Sending to OpenAI API..."
-    response=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "https://api.openai.com/v1/audio/transcriptions" \
-        -H "Authorization: Bearer $OPENAI_API_KEY" \
-        -F "file=@$AUDIO_FILE" \
-        -F "model=whisper-1" \
-        -F "response_format=json")
-
-    http_status=$(echo "$response" | grep "HTTP_STATUS:" | cut -d: -f2)
-    response_body=$(echo "$response" | sed '/HTTP_STATUS:/d')
+    post_audio "$AUDIO_FILE"
 
     echo "DEBUG: HTTP Status = $http_status"
     echo "DEBUG: Response body length = ${#response_body}"

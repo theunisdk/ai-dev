@@ -1,0 +1,67 @@
+#!/bin/bash
+
+# Check if pandoc is installed
+if ! command -v pandoc &> /dev/null; then
+    echo "Error: pandoc is not installed."
+    echo "Please install it with: sudo apt-get install pandoc"
+    exit 1
+fi
+
+# Check if an argument was provided
+if [ $# -eq 0 ]; then
+    echo "Usage: $0 <file.docx|directory>"
+    echo "Example: $0 document.docx"
+    echo "Example: $0 /path/to/word/files"
+    exit 1
+fi
+
+TARGET="$1"
+
+convert_docx() {
+    local file="$1"
+    local base=$(basename "$file" .docx)
+    local output="${file%.docx}.md"
+
+    echo "Converting: $file -> $output"
+
+    if pandoc "$file" -t gfm -o "$output" 2>/dev/null; then
+        echo "✓ Successfully converted: $base.docx"
+        return 0
+    else
+        echo "✗ Failed to convert: $base.docx"
+        rm -f "$output"
+        return 1
+    fi
+}
+
+# Check if target is a file
+if [ -f "$TARGET" ]; then
+    # Verify it's a Word document
+    if [[ "$TARGET" != *.docx ]]; then
+        echo "Error: '$TARGET' is not a .docx file."
+        exit 1
+    fi
+    convert_docx "$TARGET"
+    echo "Conversion complete!"
+    exit 0
+fi
+
+# Check if target is a directory
+if [ -d "$TARGET" ]; then
+    echo "Converting Word documents in: $TARGET"
+    count=0
+
+    # Find all .docx files and convert them
+    while IFS= read -r -d '' file; do
+        if convert_docx "$file"; then
+            ((count++))
+        fi
+    done < <(find "$TARGET" -maxdepth 1 -name "*.docx" -type f -print0)
+
+    echo "Conversion complete! Converted $count file(s)."
+    exit 0
+fi
+
+# Target doesn't exist
+echo "Error: '$TARGET' is not a valid file or directory."
+exit 1
