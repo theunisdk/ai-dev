@@ -2,6 +2,8 @@
 
 Six narrow, parallel Codex review passes over your branch diff, merged into
 structured findings, adjudicated by Claude Code, gated by CodeRabbit on the PR.
+Once it's wired up, read **OPERATING.md** — how to prove the pipeline works
+(scorecard, fire drills) and the quiet failure modes to watch.
 
 The design premise: a single "review this diff" pass gets you roughly what Claude
 Code already gives you. The quality comes from **decomposition** — several
@@ -200,9 +202,10 @@ templates/             hub only: seeds for the repo-owned files (--init)
   `[profiles.name]` tables from `config.toml`. Each profile is its own file with
   top-level keys: `~/.codex/deep-review.config.toml`. If you copy a profile from
   an older blog post it will silently do nothing.
-- **Model names churn.** The profile ships with `model` commented out so it
-  inherits your Codex default. Check `/model` in the Codex TUI for what your plan
-  exposes rather than pinning a name from documentation.
+- **Model names churn.** The profile pins `gpt-5.6-sol` — the current standard
+  for code reviews. When it stops resolving, check `/model` in the Codex TUI for
+  what your plan exposes and re-pin; note the effort vocabulary is
+  model-specific (sol: `none|low|medium|high|xhigh|max`, no `minimal`).
 - **Reviewers are read-only.** Every lens runs `--sandbox read-only
   --ask-for-approval never`. They can grep your repo for context but cannot touch
   your working tree — only Claude Code writes, and only after verification.

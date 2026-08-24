@@ -67,7 +67,7 @@ cp -R "$KIT"/.claude/skills/pre-pr-review .claude/skills/
 cp -R "$KIT"/.codex/skills/. .codex/skills/
 cp "$KIT"/.githooks/pre-push .githooks/
 cp "$KIT"/.claude-plugin/*.json .claude-plugin/
-cp "$KIT"/REVIEW.md .
+cp "$KIT"/REVIEW.md "$KIT"/OPERATING.md .
 chmod +x scripts/review.sh scripts/review-install.sh scripts/review-update.sh \
          scripts/make-plugin.sh .githooks/pre-push
 

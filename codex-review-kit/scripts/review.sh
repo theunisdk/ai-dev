@@ -165,7 +165,9 @@ for lens in $LENSES; do
   } > "$pf"
 
   (
-    args="exec --profile $PROFILE --sandbox read-only --ask-for-approval never"
+    # no --ask-for-approval: removed in codex 0.149; exec is non-interactive
+    # and the deep-review profile pins approval_policy = "never" anyway.
+    args="exec --profile $PROFILE --sandbox read-only"
     args="$args -c model_reasoning_effort=$EFFORT"
     [ -n "$MODEL" ] && args="$args --model $MODEL"
     # shellcheck disable=SC2086

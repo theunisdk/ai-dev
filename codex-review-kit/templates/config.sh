@@ -4,7 +4,8 @@
 # Which lenses to run, in order. Drop one to go faster.
 # LENSES="correctness,security,contracts,resources,tests,scope"
 
-# Reasoning effort per lens: minimal | low | medium | high | xhigh
+# Reasoning effort per lens (vocabulary is model-dependent; gpt-5.6-sol
+# accepts: none | low | medium | high | xhigh | max)
 # Start at high. Drop to medium if reviews feel slow before they feel shallow.
 # EFFORT="high"
 

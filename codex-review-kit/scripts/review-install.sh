@@ -65,20 +65,22 @@ else
 # NOTE: since Codex 0.134.0, profiles live in their own file with TOP-LEVEL keys.
 # Do NOT wrap these in a [profiles.deep-review] table — that form is no longer read.
 
-# Pin your strongest coding model here. Check `/model` in the Codex TUI for what
-# your plan currently exposes; model names change often, so verify rather than
-# trusting a value copied from documentation.
-# model = "<your-best-coding-model>"
+# Pinned for now: the model everyone is using for code reviews. Model names
+# churn — when this stops resolving, check `/model` in the Codex TUI for what
+# your plan exposes and re-pin.
+model = "gpt-5.6-sol"
 
-model_reasoning_effort = "high"   # minimal | low | medium | high | xhigh
+model_reasoning_effort = "high"   # sol accepts: none | low | medium | high | xhigh | max
 model_reasoning_summary = "none"  # we only want the final JSON
 model_verbosity = "low"
 
 approval_policy = "never"         # required for headless runs
 sandbox_mode = "read-only"        # reviewers never touch the working tree
 TOML
-  ok "created: $PROFILE_FILE"
-  skip "edit it to pin a model, or leave unpinned to use your Codex default"
+  ok "created: $PROFILE_FILE (pins gpt-5.6-sol)"
+fi
+if [ -f "$PROFILE_FILE" ] && ! grep -q '^model *=' "$PROFILE_FILE"; then
+  skip "profile pins no model — the fleet standard is gpt-5.6-sol; add: model = \"gpt-5.6-sol\""
 fi
 
 # --- 4. executables --------------------------------------------------------
