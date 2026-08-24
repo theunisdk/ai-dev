@@ -37,6 +37,11 @@ first. It is not a substitute for verifying.
 Exactly one disposition per finding:
 
 - **FIX** — verified, worth changing now.
+- **LOG** — verified real, but pre-existing or unrelated to this change. File
+  it in the repo's tracker (`gh issue create`, quoting the finding and
+  location) and record the issue link in the verdict. **Do not fix it here**
+  — an unrelated fix inside this diff is unreviewable scope creep; the issue
+  link is the responsible disposition, not an ignored finding.
 - **REJECT** — verified wrong, out of scope per `.review/rubric.md`, or a
   deliberate choice. **A one-line reason is mandatory.** "Not an issue" is not a
   reason; "callers already hold the lock, see `pool.rs:88`" is.
@@ -44,7 +49,9 @@ Exactly one disposition per finding:
   touches something you should not decide alone. Leave the code untouched.
 
 `critical` and `high` are FIX or ESCALATE — never REJECT without an explicit
-verified reason. `medium` is FIX unless there is a reason. `low` is judgement.
+verified reason, and LOG only if the defect genuinely predates this change (a
+critical the diff made newly reachable is this PR's problem). `medium` is FIX
+unless there is a reason. `low` is judgement.
 
 ## 4 — Apply
 
@@ -62,7 +69,7 @@ pre-push hook can tell whether the verdict is current.
 ```markdown
 # Review verdict — <branch> — <short-sha> — <date>
 
-<n> findings · <f> fixed · <r> rejected · <e> escalated
+<n> findings · <f> fixed · <l> logged · <r> rejected · <e> escalated
 Lenses: <list> · Effort: <effort>
 
 | ID | Sev | Agree | File:line | Finding | Disposition | Reason |
