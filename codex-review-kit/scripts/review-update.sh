@@ -23,6 +23,12 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
+# Everything lives in main() so bash parses the whole script before any file
+# is copied — this script overwrites ITSELF during the sync, and an
+# interpreter still reading the old file at that moment continues at the same
+# byte offset in the new one.
+main() {
+
 KIT_GIT_URL="${REVIEW_KIT_URL:-https://github.com/theunisdk/ai-dev}"
 KIT_SUBDIR="codex-review-kit"
 
@@ -88,3 +94,6 @@ printf 'kit: %s %s\nsynced: %s\n' "$KIT_GIT_URL" "$KIT_COMMIT" "$(date +%Y-%m-%d
   > .review/kit-version
 
 echo "synced from kit @ $KIT_COMMIT → run scripts/review-install.sh if this is a new machine"
+
+}
+main "$@"
