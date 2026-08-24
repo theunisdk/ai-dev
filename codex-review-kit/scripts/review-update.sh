@@ -35,7 +35,8 @@ cd "$REPO_ROOT"
 
 # --- locate the hub --------------------------------------------------------
 TMP_CLONE=""
-cleanup() { [ -n "$TMP_CLONE" ] && rm -rf "$TMP_CLONE"; }
+# the trap's status becomes the script's exit code — must end true
+cleanup() { if [ -n "$TMP_CLONE" ]; then rm -rf "$TMP_CLONE"; fi; }
 trap cleanup EXIT
 
 if [ -n "${REVIEW_KIT_DIR:-}" ] && [ -d "$REVIEW_KIT_DIR" ]; then
