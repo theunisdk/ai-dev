@@ -12,11 +12,13 @@
         "required": [
           "file",
           "line_start",
+          "line_end",
           "severity",
           "category",
           "title",
           "why_it_matters",
           "evidence",
+          "suggested_fix",
           "confidence"
         ],
         "properties": {
@@ -54,8 +56,8 @@
             "description": "The specific code construct you read that proves this, with file:line references. If you cannot cite it, do not report it."
           },
           "suggested_fix": {
-            "type": "string",
-            "description": "Minimal concrete change. Omit rather than guess."
+            "type": ["string", "null"],
+            "description": "Minimal concrete change. Null rather than guess."
           },
           "confidence": {
             "type": "number",
