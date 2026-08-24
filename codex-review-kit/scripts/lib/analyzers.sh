@@ -18,11 +18,15 @@ collect_analyzer_output() {
   _section() { printf '\n### %s\n' "$1" >> "$report"; }
 
   # --- files by extension, existing only ---
+  # The pattern must be a literal like '*.ts|*.tsx'. eval is required: a `|`
+  # that arrives via expansion is matched literally, so `case "$f" in $pat)`
+  # never matches a multi-alternative pattern on any file without a `|` in
+  # its name.
   _files_matching() {
-    local pat="$1"
+    local pat="$1" f
     while IFS= read -r f; do
       [ -f "$f" ] || continue
-      case "$f" in $pat) printf '%s\n' "$f" ;; esac
+      eval "case \"\$f\" in $pat) printf '%s\n' \"\$f\" ;; esac"
     done < "$list"
   }
 
