@@ -19,3 +19,11 @@ before this file dilutes the prompts it feeds.
   `compact`, …); tooling that passes `--format unix` fails silently under
   `2>/dev/null`. Check the analyzer report actually has an eslint section
   before assuming lint ran.
+- 2026-08-24: a guarded conditional write rechecked the target row's own
+  columns but not the other inputs (counts from related tables) the written
+  value was computed from — when verifying concurrency guards, enumerate every
+  input of the computed value, not just the guarded row.
+- 2026-08-24: a change that widens what a selector can return left downstream
+  copy asserting the old narrower set — when a diff widens a selectable or
+  returnable set, re-read every consumer of the selection for baked-in
+  assumptions about the old shape.
