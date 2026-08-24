@@ -1,0 +1,70 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["findings"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "description": "Every issue found. Empty array is a valid and often correct answer.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "file",
+          "line_start",
+          "severity",
+          "category",
+          "title",
+          "why_it_matters",
+          "evidence",
+          "confidence"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Repo-relative path, exactly as it appears in the diff."
+          },
+          "line_start": {
+            "type": "integer",
+            "description": "Line number in the CURRENT (post-change) file. Verify by reading the file, not by counting diff hunks."
+          },
+          "line_end": {
+            "type": "integer",
+            "description": "Last relevant line; equal to line_start for a single line."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low"],
+            "description": "critical = data loss, security breach, or production outage. high = incorrect behaviour users will hit. medium = real bug on an uncommon path, or a maintenance trap. low = worth knowing, not worth blocking."
+          },
+          "category": {
+            "type": "string",
+            "description": "Short kebab-case tag, e.g. race-condition, missing-authz, breaking-api-change, n-plus-one, unhandled-rejection."
+          },
+          "title": {
+            "type": "string",
+            "description": "One line, under 90 chars, states the defect not the remedy."
+          },
+          "why_it_matters": {
+            "type": "string",
+            "description": "The concrete failure. Name the trigger condition and the observable consequence. No generic risk language."
+          },
+          "evidence": {
+            "type": "string",
+            "description": "The specific code construct you read that proves this, with file:line references. If you cannot cite it, do not report it."
+          },
+          "suggested_fix": {
+            "type": "string",
+            "description": "Minimal concrete change. Omit rather than guess."
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "0.9+ = you read the code and the defect is certain. 0.7 = very likely but depends on a caller you could not fully verify. 0.5 = plausible, needs human judgement. Below 0.5 = do not report."
+          }
+        }
+      }
+    }
+  }
+}

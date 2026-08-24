@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Warn — never block — when pushing a branch whose review verdict is stale.
+# Deliberately non-blocking: a hook that gates on a multi-minute review is a hook
+# you will disable within a week. Set REVIEW_STRICT=1 to make it blocking.
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)" || exit 0
+cd "$REPO_ROOT" || exit 0
+[ -f scripts/review.sh ] || exit 0
+
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+case "$BRANCH" in main|master|develop) exit 0 ;; esac
+
+HEAD_SHA="$(git rev-parse HEAD)"
+STALE=""
+
+if [ ! -f .review/verdict.md ]; then
+  STALE="no review verdict found"
+elif ! grep -q "${HEAD_SHA:0:10}" .review/verdict.md 2>/dev/null; then
+  # verdict exists but does not mention this commit
+  if [ .review/verdict.md -ot .git/HEAD ]; then
+    STALE="verdict predates the current HEAD"
+  fi
+fi
+
+if [ -n "$STALE" ]; then
+  printf '\n\033[33m[review]\033[0m %s for %s.\n' "$STALE" "$BRANCH"
+  printf '        Run \033[1m/review\033[0m in Claude Code before opening the PR.\n\n'
+  if [ "${REVIEW_STRICT:-0}" = "1" ]; then
+    printf '        REVIEW_STRICT=1 — blocking. Push with: REVIEW_STRICT=0 git push\n\n'
+    exit 1
+  fi
+fi
+exit 0

@@ -1,0 +1,7 @@
+{
+  "name": "codex-review",
+  "version": "1.0.0",
+  "description": "Multi-lens pre-PR code review: six parallel Codex passes over the branch diff, verified and adjudicated by Claude Code, with CodeRabbit as the final gate.",
+  "author": { "name": "" },
+  "keywords": ["code-review", "codex", "pre-pr", "static-analysis"]
+}
