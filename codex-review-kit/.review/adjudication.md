@@ -36,6 +36,13 @@ Findings carry an `agreement` count — how many independent lenses reported the
 same defect. Agreement above 1 is the strongest signal in the report; verify those
 first. It is not a substitute for verifying.
 
+The merge collapses duplicates only when titles match, so lenses often report
+one defect under several wordings — especially in spec mode. Before verifying,
+group findings that cite the same or adjacent lines, check whether they are one
+issue, and dispose of the group together; treat the group's size as its real
+agreement count. (Same-line findings are not automatically one issue — read
+them.)
+
 ## 3 — Classify
 
 Exactly one disposition per finding:
