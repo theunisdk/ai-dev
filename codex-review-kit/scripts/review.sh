@@ -10,6 +10,7 @@
 #   ./scripts/review.sh                     # diff vs auto-detected base branch
 #   ./scripts/review.sh origin/develop      # diff vs explicit base
 #   ./scripts/review.sh --uncommitted       # staged + unstaged + untracked
+#   ./scripts/review.sh --spec docs/specs/foo.md   # review a spec, not code
 #   ./scripts/review.sh --lenses security,contracts
 #   ./scripts/review.sh --effort medium --confidence 0.7
 #
@@ -36,7 +37,9 @@ LENS_TIMEOUT="900"       # seconds per lens
 FAIL_ON="none"           # none | critical | high | medium | low
 RUN_ANALYZERS="1"
 BASE=""
-MODE="branch"            # branch | uncommitted
+MODE="branch"            # branch | uncommitted | spec
+SPEC_PATHS=""
+LENSES_FLAG=0
 
 [ -f "$REPO_ROOT/.review/config.sh" ] && . "$REPO_ROOT/.review/config.sh"
 
@@ -44,7 +47,8 @@ MODE="branch"            # branch | uncommitted
 while [ $# -gt 0 ]; do
   case "$1" in
     --uncommitted)  MODE="uncommitted" ;;
-    --lenses)       LENSES="$2"; shift ;;
+    --spec)         MODE="spec"; SPEC_PATHS="$SPEC_PATHS $2"; shift ;;
+    --lenses)       LENSES="$2"; LENSES_FLAG=1; shift ;;
     --effort)       EFFORT="$2"; shift ;;
     --model)        MODEL="$2"; shift ;;
     --profile)      PROFILE="$2"; shift ;;
@@ -73,8 +77,26 @@ if ! codex login status >/dev/null 2>&1; then
   warn "could not confirm Codex auth via 'codex login status'; continuing anyway"
 fi
 
+# --- spec mode: its own lens set, no diff, no analyzers --------------------
+if [ "$MODE" = "spec" ]; then
+  [ "$LENSES_FLAG" = 1 ] || LENSES="spec-assumptions,spec-holes,spec-conflicts,spec-ambiguity"
+  RUN_ANALYZERS="0"
+fi
+
 # --- resolve the change set ------------------------------------------------
-if [ "$MODE" = "uncommitted" ]; then
+if [ "$MODE" = "spec" ]; then
+  : > "$OUT/changed-files.txt"
+  for p in $SPEC_PATHS; do
+    if [ -d "$p" ]; then
+      find "$p" -name '*.md' -type f >> "$OUT/changed-files.txt"
+    elif [ -f "$p" ]; then
+      printf '%s\n' "$p" >> "$OUT/changed-files.txt"
+    else
+      die "spec path not found: $p"
+    fi
+  done
+  RANGE_LABEL="spec documents: $(tr '\n' ' ' < "$OUT/changed-files.txt")"
+elif [ "$MODE" = "uncommitted" ]; then
   git diff HEAD > "$OUT/diff.patch"
   git ls-files --others --exclude-standard | while IFS= read -r f; do
     [ -f "$f" ] && git diff --no-index /dev/null "$f" >> "$OUT/diff.patch" 2>/dev/null
@@ -96,7 +118,8 @@ fi
 grep -v -E '^\.review/' "$OUT/changed-files.txt" | sort -u > "$OUT/changed-files.tmp" \
   && mv "$OUT/changed-files.tmp" "$OUT/changed-files.txt"
 CHANGED_COUNT="$(grep -c . < "$OUT/changed-files.txt" || true)"
-DIFF_LINES="$(wc -l < "$OUT/diff.patch" | tr -d ' ')"
+DIFF_LINES=0
+[ -f "$OUT/diff.patch" ] && DIFF_LINES="$(wc -l < "$OUT/diff.patch" | tr -d ' ')"
 
 if [ "${CHANGED_COUNT:-0}" -eq 0 ]; then
   info "no changes to review against $RANGE_LABEL"
@@ -104,7 +127,11 @@ if [ "${CHANGED_COUNT:-0}" -eq 0 ]; then
   exit 0
 fi
 
-info "reviewing $CHANGED_COUNT file(s), $DIFF_LINES diff lines — $RANGE_LABEL"
+if [ "$MODE" = "spec" ]; then
+  info "reviewing $CHANGED_COUNT spec file(s) — $RANGE_LABEL"
+else
+  info "reviewing $CHANGED_COUNT file(s), $DIFF_LINES diff lines — $RANGE_LABEL"
+fi
 
 # --- cheap static signal (fed to Codex as priors, so it aims higher) -------
 if [ "$RUN_ANALYZERS" = "1" ]; then
@@ -118,9 +145,15 @@ fi
   echo
   echo "- Repository root: \`$REPO_ROOT\`"
   echo "- Change set: $RANGE_LABEL"
-  echo "- Files changed: $CHANGED_COUNT"
-  echo "- Unified diff: \`.review/raw/diff.patch\`"
-  echo "- Changed file list: \`.review/raw/changed-files.txt\`"
+  if [ "$MODE" = "spec" ]; then
+    echo "- Documents under review (cite findings against these files' line numbers):"
+    sed 's/^/  - `/;s/$/`/' "$OUT/changed-files.txt"
+    echo "- House rules: \`.review/rubric.md\` — a spec that would violate them is a finding."
+  else
+    echo "- Files changed: $CHANGED_COUNT"
+    echo "- Unified diff: \`.review/raw/diff.patch\`"
+    echo "- Changed file list: \`.review/raw/changed-files.txt\`"
+  fi
   [ -f "$OUT/commits.txt" ] && echo "- Commits in range: \`.review/raw/commits.txt\`"
   [ -s "$OUT/analyzers.txt" ] && echo "- Static analyzer output already collected: \`.review/raw/analyzers.txt\` (do NOT re-report anything a linter already flagged there)"
   echo
@@ -139,8 +172,10 @@ for lens in $LENSES; do
   fi
 
   pf="$OUT/prompt-$lens.md"
+  common=".review/prompts/_common.md"
+  [ "$MODE" = "spec" ] && common=".review/prompts/_common-spec.md"
   {
-    cat .review/prompts/_common.md
+    cat "$common"
     echo; echo "---"; echo
     cat "$OUT/context.md"
     echo "---"; echo

@@ -7,8 +7,12 @@ identical however the review was triggered. Edit this file, not its callers.
 ## 1 — Run
 
 ```
-./scripts/review.sh [base-ref | --uncommitted]
+./scripts/review.sh [base-ref | --uncommitted | --spec <path>]
 ```
+
+(`--spec` reviews a design document instead of code — see the `/review-spec`
+command for the mode's adjudication deltas; the rest of this procedure
+applies unchanged.)
 
 Several minutes; lenses run in parallel. If it exits non-zero for a setup reason,
 fix that and stop — do not substitute a hand-rolled review.

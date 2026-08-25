@@ -114,6 +114,24 @@ things follow:
   `/model` in the Codex TUI and re-pin in
   `~/.codex/deep-review.config.toml` before blaming the prompts.
 
+## Reviewing specs before building
+
+The same pipeline points at design documents: `/review-spec <path>` (or
+`./scripts/review.sh --spec <path>`) runs four spec lenses — assumptions,
+holes, conflicts, ambiguity — that read the spec AND the repository,
+verifying every claim the spec makes about existing code and checking it
+against the rubric's house rules.
+
+Why it earns its cost: a hole found in a spec costs a paragraph; the same
+hole found in code review costs a fix round. And the ambiguity lens directly
+counters the implementer-assumption problem — every two-readings statement is
+a decision the builder would otherwise make silently; the lens turns them
+into an explicit question list you answer before the build starts.
+
+Discipline mirrors the code side: one pass per spec, adjudicate (FIXes edit
+the spec; ambiguities usually ESCALATE — that question list is the main
+deliverable), resolve, build. No loops.
+
 ## The one habit
 
 When CodeRabbit or production catches something this pipeline missed, the

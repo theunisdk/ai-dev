@@ -81,6 +81,7 @@ layout is the supported path; the plugin is untested sugar.
 ./scripts/review.sh                    # vs auto-detected base branch
 ./scripts/review.sh origin/develop     # explicit base
 ./scripts/review.sh --uncommitted      # working tree, before you commit
+./scripts/review.sh --spec docs/specs/foo.md   # review a DESIGN DOC pre-build
 ./scripts/review.sh --lenses security,contracts --effort xhigh
 ./scripts/review.sh --fail-on high     # exit 2 if anything high+ (for CI)
 ```
@@ -91,6 +92,7 @@ In Claude Code:
 |---|---|
 | **skill** `pre-pr-review` | Fires on its own when you're wrapping up — "ready to push", "does this look right", "anything I missed" |
 | `/review` | Same thing, explicitly, with arguments |
+| `/review-spec <path>` | Reviews a design doc pre-build: assumptions verified against the repo, holes, conflicts, ambiguity |
 | `/review-tune` | Folds recurring rejections into `learnings.md` to cut noise |
 | `/review-postmortem <PR>` | Records what CodeRabbit caught that we missed |
 
@@ -182,6 +184,8 @@ isn't reproducible this way — which is fine, since it's still your final gate.
     resources.md       races, locks, leaks, N+1, timeouts, transactions
     tests.md           would these tests have caught it? the revert test
     scope.md           intent fidelity, debug residue, operability
+    _common-spec.md    spec-mode role and method (claims verified in-repo)
+    spec-*.md          spec lenses: assumptions, holes, conflicts, ambiguity
 scripts/               all synced
   review.sh            the runner
   review-update.sh     pull the shared half from the hub
