@@ -31,7 +31,10 @@ Claude Code skills, authored here and symlinked into `~/.claude/skills/`. Highli
 | `tdk-1-start` | Session kickoff: load project context, confirm the starting branch |
 | `tdk-2-push-review` | Push → PR → CodeRabbit, capped at two fix rounds; every finding fixed, issue-logged, or rejected with a reason; pauses before merge |
 
-Install a skill: `ln -sfn "$(pwd)/skills/<name>" ~/.claude/skills/<name>`
+Install all skills on a machine: `./setup.sh` (idempotent — re-run after any
+pull; it symlinks every skill into `~/.claude/skills` and never clobbers a
+local copy that diverged). One skill by hand:
+`ln -sfn "$(pwd)/skills/<name>" ~/.claude/skills/<name>`
 
 ### [wsl-cli-tools/](wsl-cli-tools/)
 
