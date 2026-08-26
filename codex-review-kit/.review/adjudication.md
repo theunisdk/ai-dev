@@ -72,6 +72,14 @@ opportunistically refactor. Group related fixes into coherent commits.
 Run the project's tests and type checker. If a fix breaks a test, decide whether
 the test encoded the bug — and say which, explicitly.
 
+If the fixes amount to substantial new code — new logic or a changed
+transaction, authz, or rollout boundary, not mechanical corrections — run ONE
+scoped re-review over them (`--uncommitted`, relevant lenses only) before
+writing the verdict: fixes applied during adjudication are otherwise the only
+unreviewed code in the change, and it is exactly where downstream reviews land
+their hits. Adjudicate that re-review's findings without a further re-pass —
+one bounded loop, not a cycle.
+
 ## 5 — Write the verdict
 
 Write `.review/verdict.md`. Include the HEAD short SHA in the header so the

@@ -81,6 +81,10 @@ point of the design. Findings applied unverified are worse than no review.
   one occurrence is a one-off.
 - Never suppress a class that ever produced a genuine FIX.
 - Keep `learnings.md` under ~60 lines; past that it dilutes every prompt.
+- Watch the "LOG, but pulled into scope" pattern: occasionally a logged
+  pre-existing bug genuinely blocks the change and must ride along — but it
+  needs the user's explicit sign-off and a written reason, or log-don't-fix
+  quietly becomes fix-everything-here.
 
 ### Hub/spoke discipline
 

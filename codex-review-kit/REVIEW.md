@@ -50,14 +50,17 @@ alongside the files that are its own and never synced:
 | `learnings-shared.md` (generic + stack lessons) | hub → synced read-only | same |
 | `rubric.md`, `config.sh`, `learnings.md`, `prompts.local/`, `analyzers.local.sh` | spoke only | never |
 
-**New repo:**
+**New repo:** say `/review-onboard` in Claude Code — it bootstraps the files
+and, more importantly, does the adaptation properly: a rubric grounded in code
+it actually read, analyzer commands verified before wiring, concrete lens
+hazards, and a fire drill to prove the result. By hand, the bootstrap is:
 
 ```bash
-# grab review-update.sh from the hub once, then
-./scripts/review-update.sh --init    # syncs machinery, seeds templates
+curl -fsSL https://raw.githubusercontent.com/theunisdk/ai-dev/main/codex-review-kit/scripts/review-update.sh -o /tmp/ru.sh
+bash /tmp/ru.sh --init               # syncs machinery, seeds templates
 ./scripts/review-install.sh          # per-machine setup
-# adapt .review/rubric.md, config.sh, analyzers.local.sh, prompts.local/
-git add .review scripts .claude .codex .githooks .claude-plugin REVIEW.md AGENTS.md CLAUDE.md
+# then adapt .review/rubric.md, config.sh, analyzers.local.sh, prompts.local/
+git add .review scripts .claude .codex .githooks .claude-plugin REVIEW.md OPERATING.md AGENTS.md CLAUDE.md
 git commit -m "chore: add codex pre-PR review pipeline"
 ```
 
@@ -92,6 +95,7 @@ In Claude Code:
 |---|---|
 | **skill** `pre-pr-review` | Fires on its own when you're wrapping up — "ready to push", "does this look right", "anything I missed" |
 | `/review` | Same thing, explicitly, with arguments |
+| `/review-onboard` | Wires the kit into a new repo: grounded rubric, verified analyzers, fire drill |
 | `/review-spec <path>` | Reviews a design doc pre-build: assumptions verified against the repo, holes, conflicts, ambiguity |
 | `/review-tune` | Folds recurring rejections into `learnings.md` to cut noise |
 | `/review-postmortem <PR>` | Records what CodeRabbit caught that we missed |
