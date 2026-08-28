@@ -18,6 +18,9 @@ stale_refs=""
 while read -r local_ref local_sha _remote_ref _remote_sha; do
   [ -n "${local_ref:-}" ] || continue
   [ "$local_sha" = "$ZERO" ] && continue          # branch deletion
+  # Branches only. A tag's local_sha is the tag object, never a reviewed commit,
+  # so a verdict could never match and REVIEW_STRICT would block every tag push.
+  case "$local_ref" in refs/heads/*) ;; *) continue ;; esac
 
   branch="${local_ref#refs/heads/}"
   case "$branch" in main|master|develop) continue ;; esac

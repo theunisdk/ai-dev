@@ -20,12 +20,30 @@ set -euo pipefail
 DEST="${1:?usage: make-plugin.sh <output-dir>}"
 SRC="$(git rev-parse --show-toplevel)"
 
+# The cleanup below is destructive, so the destination has to be somewhere other
+# than the kit itself. Pointing it at the repo root, or anywhere inside it, would
+# delete the very scripts and skills being packaged.
+mkdir -p "$DEST"
+dest_abs="$(cd "$DEST" && pwd -P)"
+src_abs="$(cd "$SRC" && pwd -P)"
+case "$dest_abs" in
+  "$src_abs"|"$src_abs"/*)
+    echo "error: destination is inside the kit ($dest_abs) — pick a directory outside $src_abs" >&2
+    exit 1 ;;
+esac
+case "$src_abs" in
+  "$dest_abs"/*)
+    echo "error: destination contains the kit ($dest_abs) — pick a directory outside $src_abs" >&2
+    exit 1 ;;
+esac
+
 # Generated content is replaced wholesale, not overlaid: a command or skill
 # deleted from the kit would otherwise survive in a reused output directory and
 # ship in the plugin forever. Anything else in DEST (.git, notes) is left alone.
 for d in .claude-plugin commands skills scripts review; do
-  rm -rf "${DEST:?}/$d"
+  rm -rf "${dest_abs:?}/$d"
 done
+DEST="$dest_abs"
 mkdir -p "$DEST/.claude-plugin" "$DEST/commands" "$DEST/skills" "$DEST/scripts/lib" "$DEST/review"
 
 # Explicit allowlist, not a glob: .claude/skills/ also holds repo-private skills
