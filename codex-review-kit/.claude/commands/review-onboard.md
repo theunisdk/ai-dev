@@ -17,6 +17,11 @@ curl -fsSL https://raw.githubusercontent.com/theunisdk/ai-dev/main/codex-review-
 bash /tmp/ru.sh --init          # syncs machinery, seeds repo-owned templates
 ./scripts/review-install.sh     # per-machine setup (profile, hooks, pointers)
 ```
+Prefer a local hub clone when one exists — `$REVIEW_KIT_DIR` or
+`~/dev/private/ai-dev/codex-review-kit` — and run its `review-update.sh --init`
+directly. The curl fetches a mutable branch with no integrity check, so read
+`/tmp/ru.sh` before you run it.
+
 If `core.hooksPath` was already set, check whether it points somewhere real
 before leaving it alone — stale absolute paths from repo moves are common.
 

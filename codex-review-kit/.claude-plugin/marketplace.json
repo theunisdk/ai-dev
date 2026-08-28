@@ -9,7 +9,6 @@
     {
       "name": "codex-review",
       "source": "./",
-      "version": "1.0.0",
       "description": "Multi-lens pre-PR code review via parallel Codex passes, adjudicated by Claude Code.",
       "keywords": ["code-review", "codex", "pre-pr"]
     }

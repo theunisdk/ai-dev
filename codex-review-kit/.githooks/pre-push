@@ -8,27 +8,35 @@ REPO_ROOT="$(git rev-parse --show-toplevel)" || exit 0
 cd "$REPO_ROOT" || exit 0
 [ -f scripts/review.sh ] || exit 0
 
-BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-case "$BRANCH" in main|master|develop) exit 0 ;; esac
+# Judge the refs git is actually pushing, read from stdin as
+# "<local_ref> <local_sha> <remote_ref> <remote_sha>". Using the checked-out
+# branch instead would clear `git push origin other-branch` on the strength of
+# the current branch's verdict, and REVIEW_STRICT would not block it.
+ZERO="0000000000000000000000000000000000000000"
+stale_refs=""
 
-HEAD_SHA="$(git rev-parse HEAD)"
-STALE=""
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+  [ -n "${local_ref:-}" ] || continue
+  [ "$local_sha" = "$ZERO" ] && continue          # branch deletion
 
-if [ ! -f .review/verdict.md ]; then
-  STALE="no review verdict found"
-elif ! grep -q "${HEAD_SHA:0:10}" .review/verdict.md 2>/dev/null; then
-  # verdict exists but does not mention this commit
-  if [ .review/verdict.md -ot .git/HEAD ]; then
-    STALE="verdict predates the current HEAD"
+  branch="${local_ref#refs/heads/}"
+  case "$branch" in main|master|develop) continue ;; esac
+
+  if [ ! -f .review/verdict.md ]; then
+    stale_refs="$stale_refs\n  $branch — no review verdict found"
+  elif ! grep -q "${local_sha:0:10}" .review/verdict.md 2>/dev/null; then
+    # The verdict must name the commit being pushed. File mtime is not evidence:
+    # it says when the file was written, not which commit it judged.
+    stale_refs="$stale_refs\n  $branch — verdict does not cover ${local_sha:0:10}"
   fi
-fi
+done
 
-if [ -n "$STALE" ]; then
-  printf '\n\033[33m[review]\033[0m %s for %s.\n' "$STALE" "$BRANCH"
-  printf '        Run \033[1m/review\033[0m in Claude Code before opening the PR.\n\n'
-  if [ "${REVIEW_STRICT:-0}" = "1" ]; then
-    printf '        REVIEW_STRICT=1 — blocking. Push with: REVIEW_STRICT=0 git push\n\n'
-    exit 1
-  fi
+[ -n "$stale_refs" ] || exit 0
+
+printf '\n\033[33m[review]\033[0m stale or missing review verdict:%b\n' "$stale_refs"
+printf '        Run \033[1m/review\033[0m in Claude Code before opening the PR.\n\n'
+if [ "${REVIEW_STRICT:-0}" = "1" ]; then
+  printf '        REVIEW_STRICT=1 — blocking. Push with: REVIEW_STRICT=0 git push\n\n'
+  exit 1
 fi
 exit 0

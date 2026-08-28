@@ -24,9 +24,11 @@ CodeRabbit has reviewed the PR: $ARGUMENTS
      addition. Route it: a hazard specific to this repo goes in
      `.review/prompts.local/<lens>.md` (repo-owned overlay); one that would
      hold in any repo, or any repo on this stack, goes in the kit hub's
-     `.review/prompts/<lens>.md` (locate the hub via `$REVIEW_KIT_DIR` or
-     `.review/kit-version`; it is a PUBLIC repo — strip anything
-     identifying), committed there so every repo inherits it on its next
+     `.review/prompts/<lens>.md`. The hub checkout is `$REVIEW_KIT_DIR`, or
+     `~/dev/private/ai-dev/codex-review-kit`; `.review/kit-version` names the
+     hub commit this repo last synced, so use it to check the checkout is not
+     behind, not to find it. The hub is PUBLIC — strip anything identifying.
+     Commit there so every repo inherits it on its next
      `scripts/review-update.sh`. Never edit `.review/prompts/` in this repo —
      the next sync overwrites it.
    - Right lens, insufficient tracing → propose a `## WATCH` line, dated,

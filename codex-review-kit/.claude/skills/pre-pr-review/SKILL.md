@@ -18,6 +18,14 @@ and escalate what needs a human.
 **Follow `.review/adjudication.md` exactly.** Read it now — it is the canonical
 procedure and it is short.
 
+**Check that the run was complete before you trust it.** `.review/findings.json`
+carries `complete` and `lenses_failed`, and `findings.md` opens with an
+INCOMPLETE banner when a lens died. A lens that failed contributes an empty
+findings array, which looks exactly like a lens that ran and found nothing — so
+an incomplete run reads as a clean one unless you look. If `complete` is false,
+say so to the user and treat the failed lenses' areas as unreviewed rather than
+reporting a pass.
+
 Two things that go wrong if you improvise:
 
 - **Skipping verification.** Codex hallucinates line numbers. Applying findings

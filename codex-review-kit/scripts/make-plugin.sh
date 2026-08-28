@@ -20,12 +20,25 @@ set -euo pipefail
 DEST="${1:?usage: make-plugin.sh <output-dir>}"
 SRC="$(git rev-parse --show-toplevel)"
 
+# Generated content is replaced wholesale, not overlaid: a command or skill
+# deleted from the kit would otherwise survive in a reused output directory and
+# ship in the plugin forever. Anything else in DEST (.git, notes) is left alone.
+for d in .claude-plugin commands skills scripts review; do
+  rm -rf "${DEST:?}/$d"
+done
 mkdir -p "$DEST/.claude-plugin" "$DEST/commands" "$DEST/skills" "$DEST/scripts/lib" "$DEST/review"
+
+# Explicit allowlist, not a glob: .claude/skills/ also holds repo-private skills
+# that gitignore keeps out of git but would not keep out of a filesystem copy.
+KIT_SKILLS="pre-pr-review"
 
 cp "$SRC/.claude-plugin/plugin.json"      "$DEST/.claude-plugin/"
 cp "$SRC/.claude-plugin/marketplace.json" "$DEST/.claude-plugin/"
 cp "$SRC"/.claude/commands/*.md           "$DEST/commands/"
-cp -r "$SRC"/.claude/skills/*             "$DEST/skills/"
+for s in $KIT_SKILLS; do
+  [ -d "$SRC/.claude/skills/$s" ] || { echo "error: kit skill missing: $s" >&2; exit 1; }
+  cp -r "$SRC/.claude/skills/$s" "$DEST/skills/"
+done
 cp "$SRC"/scripts/review.sh "$SRC"/scripts/review-install.sh "$DEST/scripts/"
 cp "$SRC"/scripts/lib/*.sh                "$DEST/scripts/lib/"
 cp -r "$SRC"/.review/prompts              "$DEST/review/"

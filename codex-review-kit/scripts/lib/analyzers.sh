@@ -31,9 +31,24 @@ collect_analyzer_output() {
   }
 
   # --- secrets ------------------------------------------------------------
+  # `protect --staged` only sees the index. Both branch and uncommitted mode
+  # write diff.patch and leave the index alone, so that form scanned nothing and
+  # reported clean — output identical to a real all-clear. Scan the diff instead.
+  # rc 1 means findings; anything else means the scan itself failed, and that has
+  # to be said out loud rather than left as an empty section.
   if _have gitleaks; then
     _section "gitleaks (secrets)"
-    gitleaks protect --staged --no-banner --redact 2>&1 | head -100 >> "$report" || true
+    if [ -s "$out/diff.patch" ]; then
+      gl_out="$(gitleaks detect --pipe --no-banner --redact < "$out/diff.patch" 2>&1)"; gl_rc=$?
+      if [ "$gl_rc" -le 1 ]; then
+        printf '%s\n' "$gl_out" | head -100 >> "$report"
+      else
+        printf 'SCAN FAILED (rc=%s) — secrets were NOT checked:\n%s\n' \
+          "$gl_rc" "$(printf '%s' "$gl_out" | head -20)" >> "$report"
+      fi
+    else
+      echo "no diff to scan — secrets were NOT checked" >> "$report"
+    fi
   fi
 
   # --- semgrep (multi-language, high signal) ------------------------------

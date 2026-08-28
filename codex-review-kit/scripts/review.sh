@@ -73,9 +73,17 @@ need_cmd jq
 need_cmd codex
 [ -f .review/schema.json ] || die "missing .review/schema.json — run scripts/review-install.sh"
 
-if ! codex login status >/dev/null 2>&1; then
-  warn "could not confirm Codex auth via 'codex login status'; continuing anyway"
+# Fail closed. Every lens would fail identically on an expired login, and six
+# empty lens outputs render as a clean review — the exact shape of "nothing"
+# and "failed" being indistinguishable that this pipeline exists to catch.
+if [ "${REVIEW_SKIP_AUTH_CHECK:-0}" != "1" ] && ! codex login status >/dev/null 2>&1; then
+  die "not authenticated to Codex — run 'codex login' (REVIEW_SKIP_AUTH_CHECK=1 overrides, for when 'codex login status' is broken but exec works)"
 fi
+
+# A lens runs `codex exec`, which loads AGENTS.md — and AGENTS.md tells agents to
+# run this script. Without this guard a lens can re-enter the pipeline instead of
+# returning its findings.
+[ -z "${REVIEW_LENS_SESSION:-}" ] || die "refusing to run inside a review lens session (REVIEW_LENS_SESSION is set)"
 
 # --- spec mode: its own lens set, no diff, no analyzers --------------------
 if [ "$MODE" = "spec" ]; then
@@ -114,9 +122,14 @@ else
   RANGE_LABEL="$BASE...$(git rev-parse --abbrev-ref HEAD) (merge-base ${MERGE_BASE:0:10})"
 fi
 
-# never review our own artifacts
-grep -v -E '^\.review/' "$OUT/changed-files.txt" | sort -u > "$OUT/changed-files.tmp" \
-  && mv "$OUT/changed-files.tmp" "$OUT/changed-files.txt"
+# Never review our own artifacts — except in spec mode, where every path was
+# named explicitly on the command line and dropping one silently reviews nothing.
+if [ "$MODE" = "spec" ]; then
+  sort -u "$OUT/changed-files.txt" > "$OUT/changed-files.tmp"
+else
+  grep -v -E '^\.review/' "$OUT/changed-files.txt" | sort -u > "$OUT/changed-files.tmp"
+fi
+mv "$OUT/changed-files.tmp" "$OUT/changed-files.txt"
 CHANGED_COUNT="$(grep -c . < "$OUT/changed-files.txt" || true)"
 DIFF_LINES=0
 [ -f "$OUT/diff.patch" ] && DIFF_LINES="$(wc -l < "$OUT/diff.patch" | tr -d ' ')"
@@ -206,7 +219,7 @@ for lens in $LENSES; do
     args="$args -c model_reasoning_effort=$EFFORT"
     [ -n "$MODEL" ] && args="$args --model $MODEL"
     # shellcheck disable=SC2086
-    run_with_timeout "$LENS_TIMEOUT" \
+    REVIEW_LENS_SESSION=1 run_with_timeout "$LENS_TIMEOUT" \
       codex $args \
         --output-schema .review/schema.json \
         -o "$OUT/out-$lens.json" \
@@ -228,15 +241,18 @@ wait
 
 # --- normalise each lens output -------------------------------------------
 ok_lenses=0
+failed_lenses=""
 for lens in $launched; do
   rc="$(cat "$OUT/rc-$lens" 2>/dev/null || echo 1)"
   f="$OUT/out-$lens.json"
   if [ ! -s "$f" ]; then
     warn "lens '$lens' produced no output (rc=$rc) — see $OUT/log-$lens.txt"
+    failed_lenses="$failed_lenses $lens"
     printf '{"findings":[]}' > "$f"; continue
   fi
   salvage_json "$f" || {
     warn "lens '$lens' returned unparseable output — see $OUT/log-$lens.txt"
+    failed_lenses="$failed_lenses $lens"
     printf '{"findings":[]}' > "$f"; continue
   }
   jq --arg l "$lens" '.findings = ((.findings // []) | map(. + {lens: $l}))' "$f" \
@@ -267,6 +283,16 @@ jq -s --argjson th "$CONFIDENCE_MIN" '
     )
 ' "$OUT"/out-*.json > .review/findings.json || die "merge failed"
 
+# A lens that died contributes an empty findings array, which is indistinguishable
+# from a lens that ran and found nothing. Record which ones failed so adjudication
+# cannot read a partial run as a complete review.
+FAILED_LIST="$(printf '%s' "${failed_lenses# }")"
+jq --arg failed "$FAILED_LIST" '
+  . + { lenses_failed: ($failed | if . == "" then [] else split(" ") end) }
+  | . + { complete: ((.lenses_failed | length) == 0) }
+' .review/findings.json > .review/findings.json.tmp \
+  && mv .review/findings.json.tmp .review/findings.json
+
 TOTAL="$(jq '.findings | length' .review/findings.json)"
 
 # --- human-readable render -------------------------------------------------
@@ -275,8 +301,19 @@ TOTAL="$(jq '.findings | length' .review/findings.json)"
   echo
   echo "\`$RANGE_LABEL\` · $CHANGED_COUNT files · lenses:$launched · effort \`$EFFORT\` · min confidence \`$CONFIDENCE_MIN\`"
   echo
+  if [ -n "$FAILED_LIST" ]; then
+    echo "> **INCOMPLETE REVIEW — do not treat this as a clean pass.**"
+    echo "> These lenses produced no usable output and contributed no findings:"
+    echo "> \`$FAILED_LIST\`. Their areas are unreviewed. See \`$OUT/log-<lens>.txt\`,"
+    echo "> fix the cause and re-run before relying on this report."
+    echo
+  fi
   if [ "$(jq '.findings | length' .review/findings.json)" -eq 0 ]; then
-    echo "_No findings above the confidence threshold._"
+    if [ -n "$FAILED_LIST" ]; then
+      echo "_No findings — but the run was incomplete, so this is not a clean result._"
+    else
+      echo "_No findings above the confidence threshold._"
+    fi
   else
     jq -r '
       .findings[]
@@ -297,6 +334,7 @@ TOTAL="$(jq '.findings | length' .review/findings.json)"
 # --- summary ---------------------------------------------------------------
 echo
 info "$TOTAL finding(s) → .review/findings.json  ·  .review/findings.md"
+[ -z "$FAILED_LIST" ] || warn "INCOMPLETE: lens(es) failed and reported nothing —$failed_lenses"
 jq -r '
   (.findings | group_by(.severity) | map({(.[0].severity): length}) | add // {}) as $c
   | ["critical","high","medium","low"] | map(. + ": " + (($c[.] // 0)|tostring)) | join("   ")

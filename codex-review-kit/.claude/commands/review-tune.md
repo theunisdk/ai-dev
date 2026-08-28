@@ -5,10 +5,12 @@ allowed-tools: Bash, Read, Grep, Glob, Edit, Write
 
 Reduce false-positive noise in the Codex review by learning from what we rejected.
 
-1. Gather rejection history. Read `.review/verdict.md` if present, and search the
-   repo history for prior verdicts:
-   `git log --oneline -50 -- .review/ 2>/dev/null` and check for any
-   `.review/archive/` directory.
+1. Gather rejection history. You need the verdict BODIES — commit subjects say
+   nothing about what was rejected. Read `.review/verdict.md` if present, read
+   every file in `.review/archive/` if that directory exists, and recover the
+   superseded ones from git: `git log --format=%H -- .review/verdict.md`, then
+   `git show <sha>:.review/verdict.md` for each. Read each one's Rejected
+   section.
 
 2. Group the REJECT reasons into classes. You are looking for the same rejection
    made two or more times — one rejection is a one-off, two is a pattern.
@@ -29,8 +31,9 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
      `.review/learnings.md`, as below.
    - **Generic or stack-level** (would hold in any repo, or any repo on this
      stack) → it belongs in the kit hub's `learnings-shared.md` instead.
-     Locate the hub via `$REVIEW_KIT_DIR` or the clone this machine synced
-     from (see `.review/kit-version`). The hub is a PUBLIC repository: strip
+     The hub checkout is `$REVIEW_KIT_DIR`, or
+     `~/dev/private/ai-dev/codex-review-kit`; `.review/kit-version` names the
+     commit this repo last synced, not a path. The hub is PUBLIC: strip
      anything that identifies a repo, client, schema, or incident. Propose
      the hub edit alongside the local ones; after approval, commit it in the
      hub so other repos pick it up on their next `scripts/review-update.sh`.

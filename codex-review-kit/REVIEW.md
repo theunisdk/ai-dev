@@ -24,7 +24,7 @@ diff into callers, tests, and config.
         │
         ├─ /review in Claude Code
         │     verifies each finding against real code
-        │     → FIX / REJECT(reason) / ESCALATE
+        │     → FIX / LOG(issue) / REJECT(reason) / ESCALATE
         │     → .review/verdict.md
         │
         ├─ push → PR → CodeRabbit (final gate)
@@ -177,6 +177,7 @@ isn't reproducible this way — which is fine, since it's still your final gate.
   config.sh            REPO-OWNED  posture (all values commented out = defaults)
   analyzers.local.sh   REPO-OWNED  stack wiring, replaces the generic stanzas
   prompts.local/       REPO-OWNED  per-lens hazard overlays, appended at run time
+  adjudication.md      synced      verify → FIX/LOG/REJECT/ESCALATE → verdict
   learnings-shared.md  synced      kit-wide memory, edited only in the hub
   kit-version          synced      which hub commit this repo last pulled
   schema.json          synced      enforced output shape via codex --output-schema
@@ -196,7 +197,6 @@ scripts/               all synced
   review-install.sh    idempotent per-machine setup
   lib/common.sh        portable helpers (macOS bash 3.2 safe)
   lib/analyzers.sh     generic analyzer collection; defers to analyzers.local.sh
-  adjudication.md      verify → FIX/REJECT/ESCALATE → verdict; shared by skill + command
 .claude/               synced: /review, /review-tune, /review-postmortem + skill
 .codex/                synced: optional interactive-Codex skill
 .claude-plugin/        synced: plugin manifests
@@ -214,9 +214,10 @@ templates/             hub only: seeds for the repo-owned files (--init)
   for code reviews. When it stops resolving, check `/model` in the Codex TUI for
   what your plan exposes and re-pin; note the effort vocabulary is
   model-specific (sol: `none|low|medium|high|xhigh|max`, no `minimal`).
-- **Reviewers are read-only.** Every lens runs `--sandbox read-only
-  --ask-for-approval never`. They can grep your repo for context but cannot touch
-  your working tree — only Claude Code writes, and only after verification.
+- **Reviewers are read-only.** Every lens runs `--sandbox read-only`; the
+  deep-review profile supplies `approval_policy = "never"`, since codex 0.149
+  removed `--ask-for-approval`. They can grep your repo for context but cannot
+  touch your working tree — only Claude Code writes, and only after verification.
 - **A lens failing is non-fatal.** Others still run; check `.review/raw/log-*.txt`.
   Only a total failure aborts.
 - **Adjudication has a bias problem.** Claude Code reviewing findings about code

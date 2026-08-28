@@ -17,7 +17,13 @@ applies unchanged.)
 Several minutes; lenses run in parallel. If it exits non-zero for a setup reason,
 fix that and stop — do not substitute a hand-rolled review.
 
-Then read `.review/findings.json`.
+Then read `.review/findings.json`, and **check `complete` before anything else.**
+A lens that died contributes an empty findings array, which is indistinguishable
+from a lens that ran and found nothing — so a partial run reads as a clean pass
+unless you look. If `complete` is false, `lenses_failed` names the lenses whose
+areas went unreviewed: fix the cause and re-run, or, if you genuinely must
+proceed, say plainly in the verdict and to the user which lenses did not run.
+Never report a run with `complete: false` as a clean review.
 
 ## 2 — Verify before you trust
 
@@ -69,8 +75,10 @@ unless there is a reason. `low` is judgement.
 Apply all FIXes with the minimal change that removes the defect; do not
 opportunistically refactor. Group related fixes into coherent commits.
 
-Run the project's tests and type checker. If a fix breaks a test, decide whether
-the test encoded the bug — and say which, explicitly.
+Run the project's tests and type checker, plus the lint/analyzer gate wired in
+`.review/analyzers.local.sh` — that pass ran before the lenses, so nothing has
+ever linted the code you just wrote. If a fix breaks a test, decide whether the
+test encoded the bug — and say which, explicitly.
 
 If the fixes amount to substantial new code — new logic or a changed
 transaction, authz, or rollout boundary, not mechanical corrections — run ONE
@@ -101,7 +109,7 @@ Lenses: <list> · Effort: <effort>
 <ID — reason, one line each>
 
 ## Verification
-<test / typecheck / lint results after fixes>
+<test / typecheck / lint + analyzer results after fixes>
 ```
 
 ## 6 — Report back

@@ -88,9 +88,9 @@ point of the design. Findings applied unverified are worse than no review.
 
 ### Hub/spoke discipline
 
-- Never edit synced files (`.review/prompts/`, `scripts/`, `adjudication.md`,
-  `learnings-shared.md`) inside a repo — the next `review-update.sh` silently
-  overwrites them. Repo changes go in `prompts.local/` and
+- Never edit synced files (`.review/prompts/`, `scripts/`,
+  `.review/adjudication.md`, `learnings-shared.md`) inside a repo — the next
+  `review-update.sh` silently overwrites them. Repo changes go in `prompts.local/` and
   `analyzers.local.sh` only.
 - When a lesson generalises, confirm it actually landed as a **hub commit**,
   not just a note in the repo — routing only works if the hub receives it.
@@ -113,7 +113,8 @@ things follow:
 
 - Effort vocabulary is model-specific: sol accepts
   `none | low | medium | high | xhigh | max` (no `minimal`). An unsupported
-  value fails the lens with a 400 in its log, not a visible error.
+  value fails the lens with a 400 — nothing surfaces on the console, but the
+  response is in `.review/raw/log-<lens>.txt`.
 - When the pin stops resolving or reviews suddenly feel shallow, check
   `/model` in the Codex TUI and re-pin in
   `~/.codex/deep-review.config.toml` before blaming the prompts.

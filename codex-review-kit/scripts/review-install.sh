@@ -99,9 +99,11 @@ elif [ -n "$current" ]; then
   skip "core.hooksPath already set to '$current' — leaving alone; add .githooks/pre-push yourself"
 elif [ "$CHECK_ONLY" -eq 1 ]; then
   no "core.hooksPath not set"
-else
-  git config core.hooksPath .githooks && ok "set core.hooksPath = .githooks"
+elif git config core.hooksPath .githooks; then
+  ok "set core.hooksPath = .githooks"
   skip "hook only WARNS about a stale review; it never blocks a push"
+else
+  no "could not set core.hooksPath — the pre-push hook will not run"
 fi
 
 # --- 6. agent pointer files ------------------------------------------------
