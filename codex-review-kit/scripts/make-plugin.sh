@@ -20,12 +20,17 @@ set -euo pipefail
 DEST="${1:?usage: make-plugin.sh <output-dir>}"
 SRC="$(git rev-parse --show-toplevel)"
 
-# The cleanup below is destructive, so the destination has to be somewhere other
-# than the kit itself. Pointing it at the repo root, or anywhere inside it, would
-# delete the very scripts and skills being packaged.
+# The cleanup below runs `rm -rf` on caller-supplied subpaths, so the destination
+# has to earn that. Rather than blacklisting dangerous paths one at a time, only
+# two kinds of directory qualify: an empty one, or one this script previously
+# generated. That covers `/`, `$HOME`, the kit itself and everything else in the
+# same class, without needing to enumerate them.
 mkdir -p "$DEST"
 dest_abs="$(cd "$DEST" && pwd -P)"
 src_abs="$(cd "$SRC" && pwd -P)"
+
+[ "$dest_abs" = "/" ] && { echo "error: refusing to build into the filesystem root" >&2; exit 1; }
+
 case "$dest_abs" in
   "$src_abs"|"$src_abs"/*)
     echo "error: destination is inside the kit ($dest_abs) — pick a directory outside $src_abs" >&2
@@ -37,9 +42,15 @@ case "$src_abs" in
     exit 1 ;;
 esac
 
+if [ -n "$(ls -A "$dest_abs" 2>/dev/null)" ] && [ ! -f "$dest_abs/.claude-plugin/plugin.json" ]; then
+  echo "error: $dest_abs is not empty and was not built by this script" >&2
+  echo "       (expected .claude-plugin/plugin.json) — pick a new or previously generated directory" >&2
+  exit 1
+fi
+
 # Generated content is replaced wholesale, not overlaid: a command or skill
 # deleted from the kit would otherwise survive in a reused output directory and
-# ship in the plugin forever. Anything else in DEST (.git, notes) is left alone.
+# ship in the plugin forever.
 for d in .claude-plugin commands skills scripts review; do
   rm -rf "${dest_abs:?}/$d"
 done
