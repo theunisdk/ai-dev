@@ -93,11 +93,16 @@ point of the design. Findings applied unverified are worse than no review.
   `.review/analyzers.local.sh`, and `.review/prompts.local/`. These five are seeded once
   on `--init` and never touched again.
 - **Everything else the kit installs is synced and will be overwritten** by the next
-  `review-update.sh`, silently: all of `scripts/` (including `scripts/lib/`),
-  `.review/prompts/`, `.review/adjudication.md`, `.review/learnings-shared.md`,
-  `.review/schema.json`, `.review/.gitignore`, `.claude/commands/`,
-  `.claude/skills/pre-pr-review/`, `.codex/skills/`, `.githooks/pre-push`,
-  `.claude-plugin/`, and `REVIEW.md` and `OPERATING.md` themselves — this file included.
+  `review-update.sh`, silently: the four kit scripts (`scripts/review.sh`,
+  `scripts/review-install.sh`, `scripts/review-update.sh`, `scripts/make-plugin.sh`) and
+  `scripts/lib/*.sh`; `.review/prompts/`, `.review/adjudication.md`,
+  `.review/learnings-shared.md`, `.review/schema.json`, `.review/.gitignore`;
+  `.claude/commands/`, `.claude/skills/pre-pr-review/`, `.codex/skills/`,
+  `.githooks/pre-push`, `.claude-plugin/`; and `REVIEW.md` and `OPERATING.md` themselves —
+  this file included.
+
+  Note this is a list of *paths*, not directories: the kit owns those files inside
+  `scripts/`, not the directory. A repo's own scripts live alongside them untouched.
   The `cp` block in `scripts/review-update.sh` is the authoritative list; if the two ever
   disagree, believe the script.
 - A finding against any synced file is fixed in the hub and re-synced, not patched in the
