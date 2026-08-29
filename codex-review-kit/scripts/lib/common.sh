@@ -58,8 +58,13 @@ salvage_json() {
   sed -e 's/^[[:space:]]*```[a-zA-Z]*[[:space:]]*$//' -e 's/^[[:space:]]*```[[:space:]]*$//' \
     "$f" > "$f.strip" 2>/dev/null
   if jq -e . "$f.strip" >/dev/null 2>&1; then mv "$f.strip" "$f"; return 0; fi
-  # last resort: take from the first '{' to the last '}'
-  awk 'BEGIN{s=0} /\{/ && s==0 {s=1} s==1 {print}' "$f.strip" 2>/dev/null > "$f.brace"
+  # last resort: take from the first '{' to the last '}'. Buffering to the last line that
+  # closes a brace matters — printing to EOF leaves any trailing prose in the payload, so a
+  # lens that emitted valid JSON followed by a sentence still failed to parse.
+  awk 'BEGIN{s=0;n=0;last=0}
+       /\{/ && s==0 {s=1}
+       s==1 {buf[n++]=$0; if ($0 ~ /\}/) last=n}
+       END{for(i=0;i<last;i++) print buf[i]}' "$f.strip" 2>/dev/null > "$f.brace"
   if jq -e . "$f.brace" >/dev/null 2>&1; then mv "$f.brace" "$f"; rm -f "$f.strip"; return 0; fi
   rm -f "$f.strip" "$f.brace"
   return 1

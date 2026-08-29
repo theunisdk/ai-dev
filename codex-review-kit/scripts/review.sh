@@ -57,7 +57,7 @@ while [ $# -gt 0 ]; do
     --fail-on)      FAIL_ON="$2"; shift ;;
     --no-analyzers) RUN_ANALYZERS="0" ;;
     --parallel)     MAX_PARALLEL="$2"; shift ;;
-    -h|--help)      sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help)      sed -n '2,18p' "$0"; exit 0 ;;
     -*)             die "unknown flag: $1" ;;
     *)              BASE="$1" ;;
   esac
@@ -136,7 +136,12 @@ DIFF_LINES=0
 
 if [ "${CHANGED_COUNT:-0}" -eq 0 ]; then
   info "no changes to review against $RANGE_LABEL"
-  printf '{"findings":[]}' > .review/findings.json
+  # Carries complete/lenses_failed like every other exit path. Adjudication is told to check
+  # `complete` before anything else, so a payload without it forces the reader to guess — and
+  # the guess that a clean run and a broken one look alike is exactly what those fields exist
+  # to prevent.
+  printf '{"findings":[],"lenses_failed":[],"complete":true}\n' > .review/findings.json
+  printf '# Codex pre-PR review\n\nNo changes to review against %s.\n' "$RANGE_LABEL" > .review/findings.md
   exit 0
 fi
 
@@ -181,7 +186,13 @@ for lens in $LENSES; do
   [ -n "$lens" ] || { IFS=','; continue; }
   lens_file=".review/prompts/${lens}.md"
   if [ ! -f "$lens_file" ]; then
-    warn "no prompt for lens '$lens' at $lens_file — skipping"; IFS=','; continue
+    # Counted as failed, not merely skipped: its area went unreviewed either way, and a run
+    # that silently drops a lens while reporting complete:true is the failure this whole
+    # field exists to make visible. A local overlay alone does not create a lens — the shared
+    # base prompt has to exist too.
+    warn "no prompt for lens '$lens' at $lens_file — skipping"
+    missing_lenses="${missing_lenses:-} $lens"
+    IFS=','; continue
   fi
 
   pf="$OUT/prompt-$lens.md"
@@ -262,7 +273,18 @@ for lens in $launched; do
   ok_lenses=$((ok_lenses + 1))
 done
 
-[ "$ok_lenses" -gt 0 ] || die "every lens failed — check $OUT/log-*.txt"
+if [ "$ok_lenses" -eq 0 ]; then
+  # Write the failure out before dying. Otherwise .review/findings.json still holds the
+  # PREVIOUS run's report — with its own complete:true — and the next reader adjudicates a
+  # stale pass against the current branch without anything saying so.
+  failed_lenses="$failed_lenses${missing_lenses:-}"
+  jq -n --arg failed "$(printf '%s' "${failed_lenses# }")" \
+    '{findings: [], lenses_failed: ($failed | if . == "" then [] else split(" ") end), complete: false}' \
+    > .review/findings.json
+  printf '# Codex pre-PR review\n\n> **INCOMPLETE — every lens failed.** No area of this diff was reviewed.\n> Check `%s/log-*.txt`.\n' \
+    "$OUT" > .review/findings.md
+  die "every lens failed — check $OUT/log-*.txt"
+fi
 
 # --- merge, filter, dedupe, sort ------------------------------------------
 jq -s --argjson th "$CONFIDENCE_MIN" '
@@ -286,6 +308,7 @@ jq -s --argjson th "$CONFIDENCE_MIN" '
 # A lens that died contributes an empty findings array, which is indistinguishable
 # from a lens that ran and found nothing. Record which ones failed so adjudication
 # cannot read a partial run as a complete review.
+failed_lenses="$failed_lenses${missing_lenses:-}"
 FAILED_LIST="$(printf '%s' "${failed_lenses# }")"
 jq --arg failed "$FAILED_LIST" '
   . + { lenses_failed: ($failed | if . == "" then [] else split(" ") end) }

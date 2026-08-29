@@ -89,9 +89,12 @@ point of the design. Findings applied unverified are worse than no review.
 ### Hub/spoke discipline
 
 - Never edit synced files (`.review/prompts/`, `scripts/`,
-  `.review/adjudication.md`, `learnings-shared.md`) inside a repo — the next
-  `review-update.sh` silently overwrites them. Repo changes go in `prompts.local/` and
-  `analyzers.local.sh` only.
+  `.review/adjudication.md`, `.review/learnings-shared.md`) inside a repo — the next
+  `review-update.sh` silently overwrites them. A finding against one of those is fixed
+  in the hub and re-synced, not patched in the spoke.
+- The repo-owned files, in full: `.review/rubric.md`, `.review/learnings.md`,
+  `.review/config.sh`, `.review/analyzers.local.sh`, and `.review/prompts.local/`.
+  Everything else under `.review/` and `scripts/` belongs to the hub.
 - When a lesson generalises, confirm it actually landed as a **hub commit**,
   not just a note in the repo — routing only works if the hub receives it.
 - The hub is public: nothing routed there may carry client, repo, schema, or

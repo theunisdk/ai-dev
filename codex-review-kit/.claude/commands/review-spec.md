@@ -8,7 +8,7 @@ Review the spec BEFORE implementation, so its holes cost a paragraph instead
 of a rework. Target: $ARGUMENTS
 
 1. Run the spec lens set:
-   ```
+   ```bash
    ./scripts/review.sh --spec <path> [extra flags]
    ```
    Four lenses (assumptions, holes, conflicts, ambiguity) read the spec AND

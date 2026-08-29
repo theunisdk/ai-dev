@@ -56,10 +56,15 @@ it actually read, analyzer commands verified before wiring, concrete lens
 hazards, and a fire drill to prove the result. By hand, the bootstrap is:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/theunisdk/ai-dev/main/codex-review-kit/scripts/review-update.sh -o /tmp/ru.sh
-bash /tmp/ru.sh --init               # syncs machinery, seeds templates
+# From a local hub clone — no download, and the default path:
+REVIEW_KIT_DIR=~/dev/private/ai-dev/codex-review-kit \
+  bash ~/dev/private/ai-dev/codex-review-kit/scripts/review-update.sh --init
+# Without one, pin the fetch to a reviewed commit rather than the mutable `main`,
+# and read it before running it — the next line executes whatever it downloaded.
 ./scripts/review-install.sh          # per-machine setup
-# then adapt .review/rubric.md, config.sh, analyzers.local.sh, prompts.local/
+# then adapt the repo-owned files — all of them live under .review/:
+#   .review/rubric.md  .review/learnings.md  .review/config.sh
+#   .review/analyzers.local.sh  .review/prompts.local/
 git add .review scripts .claude .codex .githooks .claude-plugin REVIEW.md OPERATING.md AGENTS.md CLAUDE.md
 git commit -m "chore: add codex pre-PR review pipeline"
 ```

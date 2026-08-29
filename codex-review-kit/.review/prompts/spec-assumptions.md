@@ -7,8 +7,14 @@ Hunt specifically for:
 
 - **Claims about existing code** — "extend the existing service", "the model
   already has this field", "reuse the current auth check". Grep and read.
-  Confirmed → not a finding. Wrong, or you cannot find it → finding, with what
-  you actually found in `evidence`.
+  Confirmed → not a finding. **Contradicted** by something you read → finding,
+  quoting what you actually found in `evidence`.
+
+  Not finding it is not the same as it not existing: generated code, re-exports,
+  aliases, and dynamic registration all hide from grep. If you searched and came
+  up empty, either widen the search or report it as unverified with the searches
+  you ran — never as a confirmed wrong claim. A spec sent back to be rewritten
+  around a capability that was there all along costs more than the check.
 - **Assumed capabilities** — the spec relies on a library, an API of an
   internal module, a database feature, or a permission that may not exist or
   not behave as assumed. Verify against package manifests, the schema, and the

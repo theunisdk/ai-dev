@@ -1,8 +1,15 @@
 # Repo-owned lens overlays
 
 Drop a `<lens>.md` here (`correctness.md`, `security.md`, `contracts.md`,
-`resources.md`, `tests.md`, `scope.md`, or any custom lens) and the runner
-appends it to that lens's shared prompt on every run.
+`resources.md`, `tests.md`, `scope.md`) and the runner appends it to that lens's
+shared prompt on every run.
+
+**An overlay alone does not create a lens.** The runner looks for
+`.review/prompts/<lens>.md` first and skips the lens when it is absent, before it
+ever reads this directory — so a brand-new `foo` needs a shared base prompt in
+`.review/prompts/` *and* an entry in `LENSES` (`.review/config.sh` or `--lenses`).
+A skipped lens is reported in `lenses_failed` and makes the run `complete: false`,
+rather than passing silently as it once did.
 
 This is where repo-specific hazards live, so the shared prompts in
 `.review/prompts/` stay pristine and updatable via `scripts/review-update.sh`.

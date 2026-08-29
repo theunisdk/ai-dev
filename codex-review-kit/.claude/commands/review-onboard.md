@@ -19,8 +19,20 @@ bash /tmp/ru.sh --init          # syncs machinery, seeds repo-owned templates
 ```
 Prefer a local hub clone when one exists — `$REVIEW_KIT_DIR` or
 `~/dev/private/ai-dev/codex-review-kit` — and run its `review-update.sh --init`
-directly. The curl fetches a mutable branch with no integrity check, so read
-`/tmp/ru.sh` before you run it.
+directly. That path involves no download at all and is the one to use by default.
+
+The curl above fetches `main`, a mutable branch, and the next line executes it.
+Anything that changes what `main` points at — a force-push, a compromised
+account — runs as you, on your machine. If you must use it, pin the fetch to a
+commit you have looked at and check what you got before running it:
+
+```bash
+REV=<commit-sha>                     # not `main`
+curl -fsSL "https://raw.githubusercontent.com/theunisdk/ai-dev/$REV/codex-review-kit/scripts/review-update.sh" -o /tmp/ru.sh
+shasum -a 256 /tmp/ru.sh             # compare against the sha you expect
+less /tmp/ru.sh                      # read it
+bash /tmp/ru.sh --init
+```
 
 If `core.hooksPath` was already set, check whether it points somewhere real
 before leaving it alone — stale absolute paths from repo moves are common.
