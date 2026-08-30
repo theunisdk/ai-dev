@@ -18,11 +18,14 @@ Several minutes; lenses run in parallel. If it exits non-zero for a setup reason
 fix that and stop — do not substitute a hand-rolled review.
 
 Then read `.review/findings.json`, and **check `complete` before anything else.**
-A lens that died contributes an empty findings array, which is indistinguishable
-from a lens that ran and found nothing — so a partial run reads as a clean pass
-unless you look. If `complete` is false, `lenses_failed` names the lenses whose
-areas went unreviewed: fix the cause and re-run, or, if you genuinely must
-proceed, say plainly in the verdict and to the user which lenses did not run.
+A lens that died usually contributes an empty findings array, which is
+indistinguishable from a lens that ran and found nothing — so a partial run
+reads as a clean pass unless you look. If `complete` is false, `lenses_failed`
+names the lenses whose areas went unreviewed. A failed lens may still have
+contributed findings (partial output salvaged before it died): treat those as
+real, but never as evidence its area was covered. Fix the cause and re-run,
+or, if you genuinely must proceed, say plainly in the verdict and to the user
+which lenses did not finish.
 Never report a run with `complete: false` as a clean review.
 
 ## 2 — Verify before you trust
