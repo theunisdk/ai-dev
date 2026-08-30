@@ -343,7 +343,7 @@ TOTAL="$(jq '.findings | length' .review/findings.json)"
     echo "> **INCOMPLETE REVIEW — do not treat this as a clean pass.**"
     echo "> These lenses did not finish their review: \`$FAILED_LIST\`."
     echo "> Their areas are unreviewed; any findings they emitted before failing are"
-    echo "> kept above. See \`$OUT/log-<lens>.txt\`, fix the cause and re-run before"
+    echo "> listed below. See \`$OUT/log-<lens>.txt\`, fix the cause and re-run before"
     echo "> relying on this report."
     echo
   fi
