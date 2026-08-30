@@ -13,12 +13,12 @@ rule is worse than none.**
 
 If the kit isn't present yet:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/theunisdk/ai-dev/main/codex-review-kit/scripts/review-update.sh -o /tmp/ru.sh
+curl -fsSL https://raw.githubusercontent.com/theunisdk/codex-review-kit/main/scripts/review-update.sh -o /tmp/ru.sh
 bash /tmp/ru.sh --init          # syncs machinery, seeds repo-owned templates
 ./scripts/review-install.sh     # per-machine setup (profile, hooks, pointers)
 ```
 Prefer a local hub clone when one exists — `$REVIEW_KIT_DIR` or
-`~/dev/private/ai-dev/codex-review-kit` — and run its `review-update.sh --init`
+`~/dev/private/codex-review-kit` — and run its `review-update.sh --init`
 directly. That path involves no download at all and is the one to use by default.
 
 The curl above fetches `main`, a mutable branch, and the next line executes it.
@@ -28,7 +28,7 @@ commit you have looked at and check what you got before running it:
 
 ```bash
 REV=<commit-sha>                     # not `main`
-curl -fsSL "https://raw.githubusercontent.com/theunisdk/ai-dev/$REV/codex-review-kit/scripts/review-update.sh" -o /tmp/ru.sh
+curl -fsSL "https://raw.githubusercontent.com/theunisdk/codex-review-kit/$REV/scripts/review-update.sh" -o /tmp/ru.sh
 shasum -a 256 /tmp/ru.sh             # compare against the sha you expect
 less /tmp/ru.sh                      # read it
 bash /tmp/ru.sh --init

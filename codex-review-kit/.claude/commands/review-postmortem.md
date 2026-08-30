@@ -25,7 +25,7 @@ CodeRabbit has reviewed the PR: $ARGUMENTS
      `.review/prompts.local/<lens>.md` (repo-owned overlay); one that would
      hold in any repo, or any repo on this stack, goes in the kit hub's
      `.review/prompts/<lens>.md`. The hub checkout is `$REVIEW_KIT_DIR`, or
-     `~/dev/private/ai-dev/codex-review-kit`; `.review/kit-version` names the
+     `~/dev/private/codex-review-kit`; `.review/kit-version` names the
      hub commit this repo last synced, so use it to check the checkout is not
      behind, not to find it. The hub is PUBLIC — strip anything identifying.
      Commit there so every repo inherits it on its next

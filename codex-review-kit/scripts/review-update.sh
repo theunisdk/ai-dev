@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # review-update.sh — pull the shared review-kit machinery into this repo.
 #
-# The kit lives in one hub (github.com/theunisdk/ai-dev, codex-review-kit/).
+# The kit lives in one hub (github.com/theunisdk/codex-review-kit).
 # This script copies the SHARED half into the current repo, overwriting what is
 # there; the REPO-OWNED half is never touched:
 #
@@ -19,7 +19,7 @@
 #                                        # missing, from the kit's templates/
 #
 # Hub resolution order: $REVIEW_KIT_DIR, then the local clone at
-# ~/dev/private/ai-dev, then a fresh shallow clone of the public repo.
+# ~/dev/private/codex-review-kit, then a fresh shallow clone of the public repo.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -29,8 +29,7 @@ set -euo pipefail
 # byte offset in the new one.
 main() {
 
-KIT_GIT_URL="${REVIEW_KIT_URL:-https://github.com/theunisdk/ai-dev}"
-KIT_SUBDIR="codex-review-kit"
+KIT_GIT_URL="${REVIEW_KIT_URL:-https://github.com/theunisdk/codex-review-kit}"
 
 INIT=0
 [ "${1:-}" = "--init" ] && INIT=1
@@ -47,13 +46,13 @@ trap cleanup EXIT
 
 if [ -n "${REVIEW_KIT_DIR:-}" ] && [ -d "$REVIEW_KIT_DIR" ]; then
   KIT="$REVIEW_KIT_DIR"
-elif [ -d "$HOME/dev/private/ai-dev/$KIT_SUBDIR" ]; then
-  KIT="$HOME/dev/private/ai-dev/$KIT_SUBDIR"
+elif [ -d "$HOME/dev/private/codex-review-kit/scripts" ]; then
+  KIT="$HOME/dev/private/codex-review-kit"
 else
   TMP_CLONE="$(mktemp -d)"
   echo "no local hub found — cloning $KIT_GIT_URL" >&2
   git clone --depth 1 --quiet "$KIT_GIT_URL" "$TMP_CLONE"
-  KIT="$TMP_CLONE/$KIT_SUBDIR"
+  KIT="$TMP_CLONE"
 fi
 [ -f "$KIT/scripts/review.sh" ] || {
   echo "error: '$KIT' does not look like the kit (no scripts/review.sh)" >&2; exit 1; }

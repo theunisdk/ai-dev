@@ -40,7 +40,7 @@ diff into callers, tests, and config.
 `semgrep`, `gitleaks`, plus your language's linter.
 
 **Hub and spokes.** The kit's source of truth is one public hub
-(`github.com/theunisdk/ai-dev`, `codex-review-kit/`). Each repo is a spoke: it
+(`github.com/theunisdk/codex-review-kit`). Each repo is a spoke: it
 vendors the shared machinery via `scripts/review-update.sh` and commits it,
 alongside the files that are its own and never synced:
 
@@ -57,8 +57,8 @@ hazards, and a fire drill to prove the result. By hand, the bootstrap is:
 
 ```bash
 # From a local hub clone — no download, and the default path:
-REVIEW_KIT_DIR=~/dev/private/ai-dev/codex-review-kit \
-  bash ~/dev/private/ai-dev/codex-review-kit/scripts/review-update.sh --init
+REVIEW_KIT_DIR=~/dev/private/codex-review-kit \
+  bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
 # Without one, pin the fetch to a reviewed commit rather than the mutable `main`,
 # and read it before running it — the next line executes whatever it downloaded.
 ./scripts/review-install.sh          # per-machine setup

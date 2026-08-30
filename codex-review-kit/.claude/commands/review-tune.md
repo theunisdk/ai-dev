@@ -32,7 +32,7 @@ Reduce false-positive noise in the Codex review by learning from what we rejecte
    - **Generic or stack-level** (would hold in any repo, or any repo on this
      stack) → it belongs in the kit hub's `learnings-shared.md` instead.
      The hub checkout is `$REVIEW_KIT_DIR`, or
-     `~/dev/private/ai-dev/codex-review-kit`; `.review/kit-version` names the
+     `~/dev/private/codex-review-kit`; `.review/kit-version` names the
      commit this repo last synced, not a path. The hub is PUBLIC: strip
      anything that identifies a repo, client, schema, or incident. Propose
      the hub edit alongside the local ones; after approval, commit it in the

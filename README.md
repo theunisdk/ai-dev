@@ -41,9 +41,14 @@ local copy that diverged). One skill by hand:
 
 Command-line utilities for development workflows in WSL, including file conversion (Markdown/PDF), project scaffolding, audio transcription, and more. See the [wsl-cli-tools README](wsl-cli-tools/README.md) for details.
 
-### [codex-review-kit/](codex-review-kit/)
+### [codex-review-kit/](codex-review-kit/) — moved
 
-A multi-lens pre-PR code-review pipeline: six parallel Codex review passes over a branch diff, adjudicated by Claude Code, gated by CodeRabbit. This directory is the **hub** — repos vendor the shared machinery via `scripts/review-update.sh` and keep their own rubric, learnings, and stack wiring. Lessons learned in one repo route back here and reach every other repo on its next sync. See [codex-review-kit/REVIEW.md](codex-review-kit/REVIEW.md).
+The multi-lens pre-PR review pipeline now lives in its own repo:
+**[theunisdk/codex-review-kit](https://github.com/theunisdk/codex-review-kit)**.
+The copy here is frozen at the split point so existing spokes can transition:
+their next `scripts/review-update.sh` run against this repo delivers the
+redirecting script, and every sync after that pulls from the new hub. This
+directory will be removed once all consuming repos have re-synced.
 
 ## Usage
 
