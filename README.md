@@ -15,6 +15,7 @@ Ready-to-use prompts for common AI-assisted development tasks:
 | `generate_documents_prompt_v2.md` | Generate comprehensive project documentation from code |
 | `update_documents_prompt.md` | Update existing project documentation to match current code |
 | `pr_docs_review_prompt.md` | Review PR changes and update affected documentation |
+| `setup-session-orchestration-prompt.md` | Wire cross-repo session spawning (tmux + `--remote-control`) and the `tdk-1-start` SessionStart hook into a machine's global Claude Code config |
 
 ### [skills/](skills/)
 
