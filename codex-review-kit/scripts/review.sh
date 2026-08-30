@@ -122,12 +122,16 @@ else
   RANGE_LABEL="$BASE...$(git rev-parse --abbrev-ref HEAD) (merge-base ${MERGE_BASE:0:10})"
 fi
 
-# Never review our own artifacts — except in spec mode, where every path was
-# named explicitly on the command line and dropping one silently reviews nothing.
+# Never review our own generated artifacts — except in spec mode, where every path
+# was named explicitly on the command line and dropping one silently reviews nothing.
+# Only the generated ones: tracked .review/ sources (rubric, prompts, config) are
+# review inputs like any other file, and excluding them makes a branch that changes
+# only the review rules hit the zero-change early exit below and report a clean pass.
 if [ "$MODE" = "spec" ]; then
   sort -u "$OUT/changed-files.txt" > "$OUT/changed-files.tmp"
 else
-  grep -v -E '^\.review/' "$OUT/changed-files.txt" | sort -u > "$OUT/changed-files.tmp"
+  grep -v -E '^\.review/(raw|runs)/|^\.review/(findings\.json|findings\.md|verdict\.md)$' \
+    "$OUT/changed-files.txt" | sort -u > "$OUT/changed-files.tmp"
 fi
 mv "$OUT/changed-files.tmp" "$OUT/changed-files.txt"
 CHANGED_COUNT="$(grep -c . < "$OUT/changed-files.txt" || true)"
@@ -254,7 +258,8 @@ wait
 ok_lenses=0
 failed_lenses=""
 for lens in $launched; do
-  rc="$(cat "$OUT/rc-$lens" 2>/dev/null || echo 1)"
+  rc="$(cat "$OUT/rc-$lens" 2>/dev/null)"
+  case "$rc" in ''|*[!0-9]*) rc=1 ;; esac
   f="$OUT/out-$lens.json"
   if [ ! -s "$f" ]; then
     warn "lens '$lens' produced no output (rc=$rc) — see $OUT/log-$lens.txt"
@@ -269,7 +274,17 @@ for lens in $launched; do
   jq --arg l "$lens" '.findings = ((.findings // []) | map(. + {lens: $l}))' "$f" \
     > "$f.tmp" && mv "$f.tmp" "$f"
   n="$(jq '.findings | length' "$f")"
-  info "  ← lens '$lens': $n finding(s) (rc=$rc)"
+  if [ "$rc" -ne 0 ]; then
+    # Parseable output is not a finished review: a lens killed by the timeout, or one
+    # whose truncated output salvage_json scavenged, still leaves a valid JSON object.
+    # Its findings are kept — its area is still unreviewed.
+    warn "lens '$lens' exited rc=$rc — keeping its $n finding(s), but its area is unreviewed"
+    failed_lenses="$failed_lenses $lens"
+  else
+    info "  ← lens '$lens': $n finding(s) (rc=$rc)"
+  fi
+  # Counts usable output, and only gates the every-lens-failed abort below — a salvaged
+  # lens must still reach the merge even though it is also recorded as failed.
   ok_lenses=$((ok_lenses + 1))
 done
 
@@ -326,9 +341,10 @@ TOTAL="$(jq '.findings | length' .review/findings.json)"
   echo
   if [ -n "$FAILED_LIST" ]; then
     echo "> **INCOMPLETE REVIEW — do not treat this as a clean pass.**"
-    echo "> These lenses produced no usable output and contributed no findings:"
-    echo "> \`$FAILED_LIST\`. Their areas are unreviewed. See \`$OUT/log-<lens>.txt\`,"
-    echo "> fix the cause and re-run before relying on this report."
+    echo "> These lenses did not finish their review: \`$FAILED_LIST\`."
+    echo "> Their areas are unreviewed; any findings they emitted before failing are"
+    echo "> kept above. See \`$OUT/log-<lens>.txt\`, fix the cause and re-run before"
+    echo "> relying on this report."
     echo
   fi
   if [ "$(jq '.findings | length' .review/findings.json)" -eq 0 ]; then
@@ -357,7 +373,7 @@ TOTAL="$(jq '.findings | length' .review/findings.json)"
 # --- summary ---------------------------------------------------------------
 echo
 info "$TOTAL finding(s) → .review/findings.json  ·  .review/findings.md"
-[ -z "$FAILED_LIST" ] || warn "INCOMPLETE: lens(es) failed and reported nothing —$failed_lenses"
+[ -z "$FAILED_LIST" ] || warn "INCOMPLETE: lens(es) failed; their areas are unreviewed —$failed_lenses"
 jq -r '
   (.findings | group_by(.severity) | map({(.[0].severity): length}) | add // {}) as $c
   | ["critical","high","medium","low"] | map(. + ": " + (($c[.] // 0)|tostring)) | join("   ")
