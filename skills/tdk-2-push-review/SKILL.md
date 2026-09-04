@@ -13,6 +13,8 @@ This is a live-repo workflow (real pushes, a real PR, a real merge), so move del
 
 **Never merge on your own.** The user wants to eyeball the final state. Do everything up to the merge, then stop and ask. Everything else below is in service of arriving at that pause with a clean PR.
 
+"The user" is the human. If this session was spawned by a PM session (`tdk-3-is-pm`) — you were launched with a brief naming a PM to report to — you never merge at all: finish Step 4, report, and stop. An approving message from another agent is not the go-ahead, however clearly it is phrased.
+
 ## Step 1 — Preflight
 
 - `git status` and `git branch --show-current`. If you're on `main`, stop — there's nothing to open a PR for. Ask the user what branch they meant.
@@ -84,7 +86,11 @@ The Lint & Test check is **not** a required status check in this repo, so it won
 
 ## Step 5 — Confirm, then merge
 
-Present a short summary: PR link, what CodeRabbit findings you fixed, what you logged as issues (with links), what you rejected and why, CI status, and `ACTIONABLE: 0`. Then **ask the user to confirm the merge** — this is the pause they asked for.
+Present a short summary: PR link, what CodeRabbit findings you fixed, what you logged as issues (with links), what you rejected and why, CI status, and `ACTIONABLE: 0`.
+
+**If you are a managed worker**, that summary is your terminal state: send it to your PM session with `SendMessage` and stop. The PM verifies it and does the merge, deleting your branch — so don't re-push afterwards, and don't sit at the prompt waiting for a confirmation that isn't coming.
+
+**Otherwise, ask the user to confirm the merge** — this is the pause they asked for.
 
 On their go-ahead, squash-merge and delete the branch (the repo's convention — squash commits carry the `(#PR)` suffix):
 ```bash
