@@ -25,9 +25,11 @@ the public GitHub repo is the fallback and always works.
    ```bash
    # local hub clone:
    bash ~/dev/private/codex-review-kit/scripts/review-update.sh --init
-   # or, no local clone:
-   curl -fsSL https://raw.githubusercontent.com/theunisdk/codex-review-kit/main/scripts/review-update.sh -o /tmp/ru.sh
-   bash /tmp/ru.sh --init
+   # or, no local clone — fetch the latest release, never `main`:
+   KIT=https://github.com/theunisdk/codex-review-kit
+   TAG=$(git ls-remote --tags --refs --sort=-v:refname "$KIT" 'v*' | head -1 | sed 's|.*refs/tags/||')
+   curl -fsSL "https://raw.githubusercontent.com/theunisdk/codex-review-kit/$TAG/scripts/review-update.sh" -o /tmp/ru.sh
+   bash /tmp/ru.sh --init          # read /tmp/ru.sh first; it runs as you
    ```
    Then `./scripts/review-install.sh` (per-machine: codex profile pinned to
    the fleet-standard model, git hooks, AGENTS.md/CLAUDE.md pointers).
