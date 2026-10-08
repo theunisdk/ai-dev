@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Machine setup for this toolkit: symlink every skill in skills/ into
-# ~/.claude/skills so Claude Code discovers them. Idempotent — run it after
-# every pull that adds a skill; existing correct links are just refreshed.
+# Machine setup for this toolkit: symlink every skill in skills/ and every mod in
+# mods/ into ~/.claude/skills so Claude Code discovers them (a folder there holding
+# .claude-plugin/plugin.json loads as a plugin). Idempotent — run it after every
+# pull that adds a skill or mod; existing correct links are just refreshed.
 #
 #   git clone git@github.com:theunisdk/ai-dev.git && cd ai-dev && ./setup.sh
 set -uo pipefail
@@ -11,9 +12,10 @@ DEST_ROOT="$HOME/.claude/skills"
 mkdir -p "$DEST_ROOT"
 
 linked=0; kept=0; conflicts=0
-for src in "$REPO_DIR"/skills/*/; do
+
+link() {
+  local src="$1" name dest
   name="$(basename "$src")"
-  [ -f "$src/SKILL.md" ] || continue
   dest="$DEST_ROOT/$name"
 
   if [ -L "$dest" ]; then
@@ -30,9 +32,16 @@ for src in "$REPO_DIR"/skills/*/; do
     echo "  + linked $name"
     linked=$((linked + 1))
   fi
+}
+
+for src in "$REPO_DIR"/skills/*/; do
+  [ -f "$src/SKILL.md" ] && link "$src"
+done
+for src in "$REPO_DIR"/mods/*/; do
+  [ -f "$src/.claude-plugin/plugin.json" ] && link "$src"
 done
 
-echo "skills: $linked linked, $kept refreshed, $conflicts conflict(s)"
+echo "skills and mods: $linked linked, $kept refreshed, $conflicts conflict(s)"
 
 command -v codex >/dev/null 2>&1 || echo "note: codex CLI not on PATH — the review kit needs it (then: codex login)"
 command -v jq >/dev/null 2>&1 || echo "note: jq not installed — the review kit needs it"

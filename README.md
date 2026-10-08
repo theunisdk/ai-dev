@@ -33,10 +33,21 @@ Claude Code skills, authored here and symlinked into `~/.claude/skills/`. Highli
 | `tdk-2-push-review` | Push → PR → CodeRabbit, capped at two fix rounds; every finding fixed, issue-logged, or rejected with a reason; pauses before merge |
 | `tdk-3-is-pm` | Take the PM role for a feature: decompose it, spawn a worker session per task, filter their reports, and own every merge to `main` |
 
-Install all skills on a machine: `./setup.sh` (idempotent — re-run after any
-pull; it symlinks every skill into `~/.claude/skills` and never clobbers a
+Install all skills and mods on a machine: `./setup.sh` (idempotent — re-run after any
+pull; it symlinks every skill and mod into `~/.claude/skills` and never clobbers a
 local copy that diverged). One skill by hand:
 `ln -sfn "$(pwd)/skills/<name>" ~/.claude/skills/<name>`
+
+### [mods/](mods/)
+
+Claude Code mods: plugins whose function hooks draw UI inside Claude Code (the
+terminal and the desktop Code tab). `./setup.sh` links each one into
+`~/.claude/skills/`, where Claude Code loads it as a plugin in every session; in
+a session that is already open, run `/reload-plugins` to pick up a new one.
+
+| Mod | Purpose |
+|-----|---------|
+| `session-board` | `/board` opens a pane listing running sessions grouped under their PM (`<project>-pm-<number>-…`, workers carry the same number), with the ones waiting on you on top. The session showing it needs Remote Control on to see other machines |
 
 ### [wsl-cli-tools/](wsl-cli-tools/)
 
