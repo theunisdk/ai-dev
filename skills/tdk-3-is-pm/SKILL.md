@@ -37,6 +37,10 @@ Nothing spawns until you can state, in your own words: the goal, what done means
 and which repos are involved. Ask the user in **one batched round** — intake is the one place you
 may spend his attention freely, because every later interruption costs more.
 
+**Feature-level "done" is settled — never ask it:** every task merged to `main` through Step 5, then
+the PM runs the repo's deploy and verifies it on the target — but only after the user says go to
+the deploy. Ask only when the request itself says otherwise (e.g. "merge only", "don't deploy").
+
 Then post the breakdown in chat: numbered tasks, each with scope, repo, dependencies, and an
 observable definition of done; what runs in parallel versus what is serial; anything you would hold
 back until another task lands.
@@ -50,10 +54,14 @@ on setup (and sometimes getting it wrong):
 
 ```bash
 git -C <repo> worktree add ../<repo>-<task> -b feat/<task>
-tmux new-session -d -s <feature>-<task> -c <worktree-path> "claude --remote-control <feature>-<task>"
+id=$(tmux display-message -p '#S' | grep -oE '[0-9]{4}$')   # this PM's family id
+id=${id:-$(printf '%04d' $((RANDOM % 9000 + 1000)))}         # PM not started by a launcher? mint one
+tmux new-session -d -s <task>-$id -c <worktree-path> "claude --remote-control <task>-$id"
 ```
 
-- Name sessions `<feature>-<task>` so `ListAgents` reads like the board.
+- Name workers `<task>-<id>` where `<id>` is this PM's 4-digit id (`serova-pm-4821` spawns
+  `billing-4821`, `api-4821`). The shared id makes the family obvious in tmux, `ListAgents` and
+  the Claude app, and the `-pm-` session is the parent. Never put `-pm-` in a worker's name.
 - Workers can run a different model: `claude --model opus …`. The PM runs Fable for filtering;
   workers usually want the strongest coding model.
 - First launch in a directory may need one interactive trust answer from the user — say so when you
