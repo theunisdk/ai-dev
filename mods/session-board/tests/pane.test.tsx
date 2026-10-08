@@ -156,3 +156,25 @@ test('/board again refreshes at once without a second timer', async ($, on) => {
   await clock.advance(5000)
   expect(world.calls).toBe(3)
 })
+
+test('does not toast for sessions already shown when /board reopens the pane', async ($, on) => {
+  const { clock, world } = engine(on, [{ listing: ONE_WAITING }, { listing: WORKER_WAITING }, { listing: WORKER_WAITING.replace('tbagdev-help [5e23ee]  ·  Remote Control  ·  idle', 'tbagdev-help [5e23ee]  ·  Remote Control  ·  requires_action') }])
+  await start($)
+  await openBoard($)
+  world.isOpen = false
+  await clock.advance(5000)
+  await openBoard($)
+  expect(world.toasts).toEqual([])
+  await clock.advance(5000)
+  expect(world.toasts).toEqual(['tbagdev-help needs you'])
+})
+
+test('says it has not updated when the first check fails', async ($, on) => {
+  engine(on, [{ deny: 'ListAgents is not available' }])
+  await start($)
+  await openBoard($)
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'desktop', component: 'Pane', requestId: PANE, props: PANE_PROPS })
+  expect(await ui.find({ type: 'Text', text: /^Last check failed at/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Not updated yet' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Checking…' })).toBeUndefined()
+})

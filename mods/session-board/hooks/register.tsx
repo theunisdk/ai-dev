@@ -31,7 +31,7 @@ async function readListing($: EngineInterface): Promise<string> {
 let timer: Timer | null = null
 let isPolling = false
 
-async function poll($: EngineInterface): Promise<void> {
+async function poll($: EngineInterface, isQuiet = false): Promise<void> {
   if (isPolling) return
   isPolling = true
   try {
@@ -45,7 +45,7 @@ async function poll($: EngineInterface): Promise<void> {
       await update($, snapshot, current => ({ ...current, error: { message, at: now } }))
       return
     }
-    if (before.checkedAt !== null) {
+    if (before.checkedAt !== null && !isQuiet) {
       for (const name of newlyWaiting(before.sessions, sessions)) $.ui.toast(`${name} needs you`)
     }
     await update($, snapshot, () => ({ sessions, checkedAt: now, error: null }))
@@ -64,9 +64,9 @@ async function tick($: EngineInterface): Promise<void> {
   await poll($)
 }
 
-async function startPolling($: EngineInterface): Promise<void> {
+async function startPolling($: EngineInterface, isQuiet = false): Promise<void> {
   if (timer === null) timer = $.clock.every(POLL_MS, () => void tick($))
-  await poll($)
+  await poll($, isQuiet)
 }
 
 export const register: Register = on => {
@@ -81,8 +81,9 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'board' }, async $ => {
+    const wasOpen = (await $.ui.panes()).some(pane => pane.id === PANE)
     await $.ui.open({ id: PANE, title: 'Sessions' })
-    await startPolling($)
+    await startPolling($, !wasOpen)
     return { text: 'Session board opened.' }
   })
 
@@ -156,7 +157,11 @@ export const register: Register = on => {
           </Text>
         )}
         <Text dimColor>
-          {snap.checkedAt === null ? 'Checking…' : `Updated ${clockTime(snap.checkedAt)}`}
+          {snap.checkedAt !== null
+            ? `Updated ${clockTime(snap.checkedAt)}`
+            : snap.error !== null
+              ? 'Not updated yet'
+              : 'Checking…'}
         </Text>
       </Box>
     )

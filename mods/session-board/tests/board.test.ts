@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { buildBoard, groupOf, newlyWaiting, parseListing } from '../hooks/board'
-import { ALL_IDLE, LOCAL_ONLY, ONE_WAITING, WORKER_WAITING } from './fixtures'
+import { ALL_IDLE, LOCAL_ONLY, ONE_WAITING, TODAY, WORKER_WAITING } from './fixtures'
 
 describe('parseListing', () => {
   test('reads every peer row and skips the header lines', () => {
@@ -65,6 +65,50 @@ describe('parseListing', () => {
   })
 })
 
+describe('parseListing layout', () => {
+  test('reads rows without the two-space indent', () => {
+    const sessions = parseListing(
+      'Peer sessions (1):\nw-1234 [a1]  ·  Remote Control  ·  idle  ·  started 1m ago',
+    )
+    expect(sessions.map(s => [s.name, s.kind, s.status, s.isParsed])).toEqual([
+      ['w-1234', 'Remote Control', 'idle', true],
+    ])
+  })
+
+  test('strips a list bullet from the name', () => {
+    const sessions = parseListing('- w-1234 [a1]  ·  Remote Control  ·  idle\n* x-5678  ·  interactive  ·  busy')
+    expect(sessions.map(s => s.name)).toEqual(['w-1234', 'x-5678'])
+  })
+
+  test('header lines produce no rows', () => {
+    expect(parseListing('This session is x [d34ee0] — the name others use.\n\nPeer sessions (0):')).toEqual([])
+  })
+
+  test('skips the Subagents and Teammates sections', () => {
+    const sessions = parseListing(
+      `Peer sessions (1):
+  a-1234 [a1]  ·  Remote Control  ·  idle
+
+Subagents (1):
+  a1e3c066a766cea25  ·  general-purpose  ·  running  ·  started 2m ago
+
+Teammates (2):
+  mate-one  ·  teammate  ·  busy
+  mate-two  ·  teammate  ·  idle`,
+    )
+    expect(sessions.map(s => s.name)).toEqual(['a-1234'])
+  })
+
+  test('keeps rows under an unknown section and rows before any header', () => {
+    const sessions = parseListing(
+      `  first-1234 [a1]  ·  Remote Control  ·  idle
+Cloud sessions (1):
+  cloud-5678 [b2]  ·  Cloud  ·  busy`,
+    )
+    expect(sessions.map(s => s.name)).toEqual(['first-1234', 'cloud-5678'])
+  })
+})
+
 describe('groupOf', () => {
   test('finds the PM by its pm-<number> token', () => {
     expect(groupOf('serova-pm-5158-shane')).toEqual({ number: '5158', isPm: true })
@@ -125,6 +169,22 @@ describe('buildBoard', () => {
 
   test('says when no Remote Control session is listed', () => {
     expect(buildBoard(parseListing(LOCAL_ONLY)).hasRemote).toBe(false)
+  })
+
+  test("lays out today's listing into groups, needs-you and Other", () => {
+    const board = buildBoard(parseListing(TODAY))
+    expect(
+      board.groups.map(g => [g.number, g.pms.map(s => s.name), g.workers.map(s => s.name)]),
+    ).toEqual([
+      ['1774', ['meeting-pm-1774-security'], ['zipauth-1774', 'sec-2b-1774']],
+      ['9396', ['tektons-pm-9396-memebrdb'], ['member-site-9396', 'member-app-9396']],
+      ['5158', ['serova-pm-5158-shane'], ['add-member-corova-5158']],
+    ])
+    expect(board.needsYou.map(n => [n.session.name, n.pmName])).toEqual([
+      ['pixeljoy-esp32-6d', null],
+      ['zipauth-1774', 'meeting-pm-1774-security'],
+    ])
+    expect(board.other.map(s => s.name)).toContain('xxxxx - Spawner')
   })
 
   test('never groups a row it could not read', () => {

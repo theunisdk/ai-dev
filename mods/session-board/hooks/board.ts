@@ -1,7 +1,9 @@
 import type { Board, Group, Session, SessionState } from '../types'
 
 // A ListAgents row: `  <name> [<ref>]  ·  <kind>  ·  <status>[  ·  started …]`
-const ROW = /^\s+(.+?)(?: \[[^\]]+\])?\s+·\s+(.+?)\s+·\s+([^\s·]+)(?:\s+·.*)?$/
+const ROW = /^\s*(?:[-*]\s+)?(.+?)(?: \[[^\]]+\])?\s+·\s+(.+?)\s+·\s+([^\s·]+)(?:\s+·.*)?$/
+const HEADER = /^(\S.*?) \(\d+\):$/
+const SKIPPED_SECTION = /^(subagents|teammates)/i
 const NUMBER = /^\d{3,}$/
 
 const STATES: Record<string, SessionState> = {
@@ -14,8 +16,12 @@ const STATES: Record<string, SessionState> = {
 
 export function parseListing(listing: string): Session[] {
   const sessions: Session[] = []
+  let isSkipped = false
   for (const line of listing.split(/\r?\n/)) {
-    if (!/^\s/.test(line) || line.trim() === '') continue
+    const header = HEADER.exec(line)
+    if (header !== null) isSkipped = SKIPPED_SECTION.test(header[1] ?? '')
+    if (isSkipped || line.trim() === '') continue
+    if (!/^\s/.test(line) && !line.includes(' · ')) continue
     const match = ROW.exec(line)
     if (match === null) {
       sessions.push({ name: line.trim(), kind: '', status: '', state: 'unknown', isParsed: false })
