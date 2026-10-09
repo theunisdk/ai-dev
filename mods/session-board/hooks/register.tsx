@@ -3,9 +3,12 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { Session, Snapshot } from '../types'
 import { buildBoard, newlyWaiting, parseListing } from './board'
+import { drawBoard } from './svg'
 
 const PANE = 'session-board'
 const POLL_MS = 5000
+const CELL_PX = 7.5
+const SVG_LIMIT = 131072
 const EMPTY: Snapshot = { sessions: [], checkedAt: null, error: null }
 const SNAPSHOT = { plugin: 'session-board', key: 'snapshot' } as const
 const snapshot = atom(SNAPSHOT, EMPTY)
@@ -89,9 +92,52 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Text } = elements
     const snap = await read($, snapshot)
     const board = buildBoard(snap.sessions)
+
+    const footer = [
+      snap.checkedAt !== null && snap.sessions.length === 0 && (
+        <Text key="empty" dimColor>
+          No other sessions running.
+        </Text>
+      ),
+      snap.checkedAt !== null && !board.hasRemote && (
+        <Text key="no-remote" dimColor>
+          No Remote Control sessions listed. Turn on Remote Control in this session to see your other
+          machines.
+        </Text>
+      ),
+      snap.error !== null && (
+        <Text key="error" dimColor>
+          Last check failed at {clockTime(snap.error.at)}: {snap.error.message}
+        </Text>
+      ),
+      <Text key="updated" dimColor>
+        {snap.checkedAt !== null
+          ? `Updated ${clockTime(snap.checkedAt)} · ${plural(snap.sessions.length, 'session')}`
+          : snap.error !== null
+            ? 'Not updated yet'
+            : 'Checking…'}
+      </Text>,
+    ]
+
+    if (e.surface !== 'terminal' && 'Svg' in elements && snap.sessions.length > 0) {
+      const width = Math.min(720, Math.max(300, Math.round(e.props.bodyColumns * CELL_PX)))
+      const drawing = drawBoard(board, width)
+      if (drawing.source.length <= SVG_LIMIT) {
+        const { Svg } = elements
+        return (
+          <Box flexDirection="column" rowGap={1}>
+            <Svg key="board" source={drawing.source} alt={drawing.alt} width={drawing.width} height={drawing.height} />
+            <Box key="footer" flexDirection="column">
+              {footer}
+            </Box>
+          </Box>
+        )
+      }
+    }
 
     const row = (key: string, session: Session, branch: string, isPm = false) => {
       const view = STATE_VIEW[session.state]
@@ -156,27 +202,7 @@ export const register: Register = on => {
           <Text dimColor wrap="truncate-end">
             {'─'.repeat(ruleWidth)}
           </Text>
-          {snap.checkedAt !== null && snap.sessions.length === 0 && (
-            <Text dimColor>No other sessions running.</Text>
-          )}
-          {snap.checkedAt !== null && !board.hasRemote && (
-            <Text dimColor>
-              No Remote Control sessions listed. Turn on Remote Control in this session to see your
-              other machines.
-            </Text>
-          )}
-          {snap.error !== null && (
-            <Text dimColor>
-              Last check failed at {clockTime(snap.error.at)}: {snap.error.message}
-            </Text>
-          )}
-          <Text dimColor>
-            {snap.checkedAt !== null
-              ? `Updated ${clockTime(snap.checkedAt)} · ${plural(snap.sessions.length, 'session')}`
-              : snap.error !== null
-                ? 'Not updated yet'
-                : 'Checking…'}
-          </Text>
+          {footer}
         </Box>
       </Box>
     )

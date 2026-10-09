@@ -3,7 +3,6 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { ALL_IDLE, LOCAL_ONLY, ONE_WAITING, TODAY, WORKER_WAITING } from './fixtures'
 
-const SURFACES = ['terminal', 'desktop'] as const
 const PANE = 'session-board'
 const PANE_PROPS = {
   title: 'Sessions',
@@ -61,8 +60,8 @@ test('/board opens the pane and draws the waiting session, groups and Other', as
   expect(await openBoard($)).toMatchObject({ text: 'Session board opened.' })
   expect(world.calls).toBe(1)
 
-  for (const surface of SURFACES) {
-    const ui = await $.ui.mount({ plugin: 'session-board', surface, component: 'Pane', requestId: PANE, props: PANE_PROPS })
+  {
+    const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS })
     expect(await ui.find({ type: 'Text', text: '▲ Needs you · 1' })).toBeDefined()
     expect((await ui.find({ key: 'wait-0' }))?.text).toMatch(/tbagbuild-server-setup/)
     expect(await ui.find({ type: 'Text', text: '5158' })).toBeDefined()
@@ -82,8 +81,8 @@ test('draws workers on tree lines, the last one closing the branch', async ($, o
   engine(on, [{ listing: TODAY }])
   await start($)
   await openBoard($)
-  for (const surface of SURFACES) {
-    const ui = await $.ui.mount({ plugin: 'session-board', surface, component: 'Pane', requestId: PANE, props: PANE_PROPS })
+  {
+    const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS })
     expect((await ui.find({ key: 'pm-9396-0' }))?.text).toMatch(/◆ tektons-pm-9396-memebrdb/)
     expect((await ui.find({ key: 'worker-9396-0' }))?.text).toMatch(/├ member-site-9396/)
     expect((await ui.find({ key: 'worker-9396-1' }))?.text).toMatch(/└ member-app-9396/)
@@ -92,11 +91,28 @@ test('draws workers on tree lines, the last one closing the branch', async ($, o
   }
 })
 
+test('draws the board as cards on desktop and mobile, with the footer as text', async ($, on) => {
+  engine(on, [{ listing: TODAY }])
+  await start($)
+  await openBoard($)
+  for (const surface of ['desktop', 'mobile'] as const) {
+    const ui = await $.ui.mount({ plugin: 'session-board', surface, component: 'Pane', requestId: PANE, props: PANE_PROPS })
+    const drawing = await ui.find({ type: 'Svg' })
+    expect(String(drawing?.props.source)).toContain('>meeting-pm-1774-security<')
+    expect(String(drawing?.props.alt)).toMatch(/^Needs you: pixeljoy-esp32-6d, zipauth-1774\./)
+    expect(await ui.find({ type: 'Text', text: /^Updated \d\d:\d\d:\d\d · 14 sessions$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '▲ Needs you · 2' })).toBeUndefined()
+    await ui.unmount()
+  }
+  const terminal = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS })
+  expect(await terminal.find({ type: 'Svg' })).toBeUndefined()
+})
+
 test('names the PM of a waiting worker', async ($, on) => {
   engine(on, [{ listing: WORKER_WAITING }])
   await start($)
   await openBoard($)
-  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'desktop', component: 'Pane', requestId: PANE, props: PANE_PROPS })
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS })
   expect((await ui.find({ key: 'wait-0' }))?.text).toMatch(/sec-2b-1774.*meeting-pm-1774-security/)
 })
 
@@ -129,7 +145,7 @@ test('keeps the last good list and shows the error when ListAgents fails', async
   await start($)
   await openBoard($)
   await clock.advance(5000)
-  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'desktop', component: 'Pane', requestId: PANE, props: PANE_PROPS })
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS })
   expect((await ui.find({ key: 'wait-0' }))?.text).toMatch(/tbagbuild-server-setup/)
   expect(await ui.find({ type: 'Text', text: /^Last check failed at \d\d:\d\d:\d\d: ListAgents is not available$/ })).toBeDefined()
 })
