@@ -10,14 +10,15 @@ const EMPTY: Snapshot = { sessions: [], checkedAt: null, error: null }
 const SNAPSHOT = { plugin: 'session-board', key: 'snapshot' } as const
 const snapshot = atom(SNAPSHOT, EMPTY)
 
-const LABEL: Record<Session['state'], string> = {
-  working: 'working',
-  'needs-you': 'needs you',
-  idle: 'idle',
-  unknown: '',
+const STATE_VIEW: Record<Session['state'], { label: string; style: Record<string, unknown> }> = {
+  working: { label: '● working', style: { color: 'success' } },
+  'needs-you': { label: '▲ needs you', style: { color: 'warning', bold: true } },
+  idle: { label: '○ idle', style: { dimColor: true } },
+  unknown: { label: '', style: {} },
 }
 
 const clockTime = (ms: number) => new Date(ms).toTimeString().slice(0, 8)
+const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? '' : 's'}`
 
 async function readListing($: EngineInterface): Promise<string> {
   const ran = await $.tool.call({ tool: 'ListAgents' })
@@ -92,77 +93,91 @@ export const register: Register = on => {
     const snap = await read($, snapshot)
     const board = buildBoard(snap.sessions)
 
-    const row = (session: Session, indent: string, tag: string) => {
-      const label = session.isParsed ? LABEL[session.state] || session.status : ''
-      const style =
-        session.state === 'needs-you'
-          ? { color: 'yellow', bold: true }
-          : session.state === 'idle'
-            ? { dimColor: true }
-            : {}
+    const row = (key: string, session: Session, branch: string, isPm = false) => {
+      const view = STATE_VIEW[session.state]
+      const label = view.label || (session.isParsed ? session.status : '')
       return (
-        <Text {...style}>
-          {indent}
-          {session.name}
-          {tag}
-          {label === '' ? '' : ` · ${label}`}
-        </Text>
+        <Box key={key} justifyContent="space-between" columnGap={2}>
+          <Box flexShrink={1}>
+            <Text dimColor>{branch}</Text>
+            <Text wrap="truncate-end">{session.name}</Text>
+            {isPm && <Text dimColor> PM</Text>}
+          </Box>
+          <Text {...view.style}>{label}</Text>
+        </Box>
       )
     }
+    const ruleWidth = Math.max(0, e.props.bodyColumns - 2)
 
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" rowGap={1} paddingX={1}>
         {board.needsYou.length > 0 && (
-          <Box key="needs-you" flexDirection="column">
-            <Text bold color="yellow">
-              Needs you
+          <Box key="needs-you" flexDirection="column" borderStyle="round" borderColor="warning" paddingX={1}>
+            <Text bold color="warning">
+              ▲ Needs you · {board.needsYou.length}
             </Text>
-            {board.needsYou.map(({ session, pmName }) => (
-              <Text color="yellow">
-                {'  '}
-                {session.name}
-                {pmName === null ? '' : `  (${pmName})`}
-              </Text>
+            {board.needsYou.map(({ session, pmName }, i) => (
+              <Box key={`wait-${i}`} justifyContent="space-between" columnGap={2}>
+                <Text color="warning" wrap="truncate-end">
+                  {session.name}
+                </Text>
+                <Text dimColor>{pmName ?? ''}</Text>
+              </Box>
             ))}
           </Box>
         )}
         {board.groups.map(group => (
           <Box key={`group-${group.number}`} flexDirection="column">
-            <Text bold>
-              {group.number}
-              {group.pms.length === 0 ? '  (no PM)' : ''}
-            </Text>
-            {group.pms.map(session => row(session, '  ', '  PM'))}
-            {group.workers.map(session => row(session, '    ', ''))}
+            <Box>
+              <Text bold color="suggestion">
+                {group.number}
+              </Text>
+              {group.pms.length === 0 && <Text dimColor> · no PM running</Text>}
+            </Box>
+            {group.pms.map((session, i) => row(`pm-${group.number}-${i}`, session, '  ◆ ', true))}
+            {group.workers.map((session, i) =>
+              row(
+                `worker-${group.number}-${i}`,
+                session,
+                i === group.workers.length - 1 ? '    └ ' : '    ├ ',
+              ),
+            )}
           </Box>
         ))}
         {board.other.length > 0 && (
           <Box key="other" flexDirection="column">
-            <Text bold>Other</Text>
-            {board.other.map(session => row(session, '  ', ''))}
+            <Text bold dimColor>
+              Other
+            </Text>
+            {board.other.map((session, i) => row(`other-${i}`, session, '  '))}
           </Box>
         )}
-        {snap.checkedAt !== null && snap.sessions.length === 0 && (
-          <Text dimColor>No other sessions running.</Text>
-        )}
-        {snap.checkedAt !== null && !board.hasRemote && (
-          <Text dimColor>
-            No Remote Control sessions listed. Turn on Remote Control in this session to see your
-            other machines.
+        <Box key="footer" flexDirection="column">
+          <Text dimColor wrap="truncate-end">
+            {'─'.repeat(ruleWidth)}
           </Text>
-        )}
-        {snap.error !== null && (
+          {snap.checkedAt !== null && snap.sessions.length === 0 && (
+            <Text dimColor>No other sessions running.</Text>
+          )}
+          {snap.checkedAt !== null && !board.hasRemote && (
+            <Text dimColor>
+              No Remote Control sessions listed. Turn on Remote Control in this session to see your
+              other machines.
+            </Text>
+          )}
+          {snap.error !== null && (
+            <Text dimColor>
+              Last check failed at {clockTime(snap.error.at)}: {snap.error.message}
+            </Text>
+          )}
           <Text dimColor>
-            Last check failed at {clockTime(snap.error.at)}: {snap.error.message}
+            {snap.checkedAt !== null
+              ? `Updated ${clockTime(snap.checkedAt)} · ${plural(snap.sessions.length, 'session')}`
+              : snap.error !== null
+                ? 'Not updated yet'
+                : 'Checking…'}
           </Text>
-        )}
-        <Text dimColor>
-          {snap.checkedAt !== null
-            ? `Updated ${clockTime(snap.checkedAt)}`
-            : snap.error !== null
-              ? 'Not updated yet'
-              : 'Checking…'}
-        </Text>
+        </Box>
       </Box>
     )
   })

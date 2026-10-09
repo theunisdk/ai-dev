@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
-import { ALL_IDLE, LOCAL_ONLY, ONE_WAITING, WORKER_WAITING } from './fixtures'
+import { ALL_IDLE, LOCAL_ONLY, ONE_WAITING, TODAY, WORKER_WAITING } from './fixtures'
 
 const SURFACES = ['terminal', 'desktop'] as const
 const PANE = 'session-board'
@@ -63,15 +63,31 @@ test('/board opens the pane and draws the waiting session, groups and Other', as
 
   for (const surface of SURFACES) {
     const ui = await $.ui.mount({ plugin: 'session-board', surface, component: 'Pane', requestId: PANE, props: PANE_PROPS })
-    expect(await ui.find({ type: 'Text', text: 'Needs you' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '  tbagbuild-server-setup' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: '▲ Needs you · 1' })).toBeDefined()
+    expect((await ui.find({ key: 'wait-0' }))?.text).toMatch(/tbagbuild-server-setup/)
     expect(await ui.find({ type: 'Text', text: '5158' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '  serova-pm-5158-shane  PM · idle' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '    add-member-corova-5158 · idle' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: '9396  (no PM)' })).toBeDefined()
+    expect((await ui.find({ key: 'pm-5158-0' }))?.text).toMatch(/◆ serova-pm-5158-shane.*PM.*○ idle/)
+    expect((await ui.find({ key: 'worker-5158-0' }))?.text).toMatch(/└ add-member-corova-5158.*○ idle/)
+    expect(await ui.find({ type: 'Text', text: ' · no PM running' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'Other' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^Updated \d\d:\d\d:\d\d$/ })).toBeDefined()
+    expect((await ui.find({ key: 'other-1' }))?.text).toMatch(/pixeljoy-esp32-6d.*● working/)
+    expect((await ui.find({ key: 'other-2' }))?.text).toMatch(/tbagbuild-server-setup.*▲ needs you/)
+    expect(await ui.find({ type: 'Text', text: /^Updated \d\d:\d\d:\d\d · 11 sessions$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /No Remote Control sessions/ })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('draws workers on tree lines, the last one closing the branch', async ($, on) => {
+  engine(on, [{ listing: TODAY }])
+  await start($)
+  await openBoard($)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ plugin: 'session-board', surface, component: 'Pane', requestId: PANE, props: PANE_PROPS })
+    expect((await ui.find({ key: 'pm-9396-0' }))?.text).toMatch(/◆ tektons-pm-9396-memebrdb/)
+    expect((await ui.find({ key: 'worker-9396-0' }))?.text).toMatch(/├ member-site-9396/)
+    expect((await ui.find({ key: 'worker-9396-1' }))?.text).toMatch(/└ member-app-9396/)
+    expect(await ui.find({ type: 'Text', text: '▲ Needs you · 2' })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -81,7 +97,7 @@ test('names the PM of a waiting worker', async ($, on) => {
   await start($)
   await openBoard($)
   const ui = await $.ui.mount({ plugin: 'session-board', surface: 'desktop', component: 'Pane', requestId: PANE, props: PANE_PROPS })
-  expect(await ui.find({ type: 'Text', text: '  sec-2b-1774  (meeting-pm-1774-security)' })).toBeDefined()
+  expect((await ui.find({ key: 'wait-0' }))?.text).toMatch(/sec-2b-1774.*meeting-pm-1774-security/)
 })
 
 test('polls every 5 s and toasts a session that starts waiting, but not on the first poll', async ($, on) => {
@@ -114,7 +130,7 @@ test('keeps the last good list and shows the error when ListAgents fails', async
   await openBoard($)
   await clock.advance(5000)
   const ui = await $.ui.mount({ plugin: 'session-board', surface: 'desktop', component: 'Pane', requestId: PANE, props: PANE_PROPS })
-  expect(await ui.find({ type: 'Text', text: '  tbagbuild-server-setup' })).toBeDefined()
+  expect((await ui.find({ key: 'wait-0' }))?.text).toMatch(/tbagbuild-server-setup/)
   expect(await ui.find({ type: 'Text', text: /^Last check failed at \d\d:\d\d:\d\d: ListAgents is not available$/ })).toBeDefined()
 })
 
