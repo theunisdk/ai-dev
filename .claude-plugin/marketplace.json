@@ -1,0 +1,14 @@
+{
+  "name": "theunisdk-ai-dev",
+  "owner": { "name": "Theunis" },
+  "metadata": {
+    "description": "Claude Code mods from theunisdk/ai-dev"
+  },
+  "plugins": [
+    {
+      "name": "session-board",
+      "description": "A pane listing running Claude Code sessions, grouped under their PM, with the ones waiting on you on top",
+      "source": "./mods/session-board"
+    }
+  ]
+}

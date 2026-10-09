@@ -1,6 +1,15 @@
 {
   "name": "session-board",
   "description": "A pane listing running Claude Code sessions, grouped under their PM, with the ones waiting on you on top",
-  "author": { "name": "Theunis" },
+  "author": {
+    "name": "Theunis"
+  },
+  "repository": "https://github.com/theunisdk/ai-dev",
+  "keywords": [
+    "sessions",
+    "remote-control",
+    "mod",
+    "pane"
+  ],
   "types": "./types/index.d.ts"
 }

@@ -34,16 +34,32 @@ Claude Code skills, authored here and symlinked into `~/.claude/skills/`. Highli
 | `tdk-3-is-pm` | Take the PM role for a feature: decompose it, spawn a worker session per task, filter their reports, and own every merge to `main` |
 
 Install all skills and mods on a machine: `./setup.sh` (idempotent — re-run after any
-pull; it symlinks every skill and mod into `~/.claude/skills` and never clobbers a
-local copy that diverged). One skill by hand:
+pull; it symlinks every skill into `~/.claude/skills`, never clobbering a local copy
+that diverged, and installs every mod — see [mods/](#mods)). One skill by hand:
 `ln -sfn "$(pwd)/skills/<name>" ~/.claude/skills/<name>`
 
 ### [mods/](mods/)
 
 Claude Code mods: plugins whose function hooks draw UI inside Claude Code (the
-terminal and the desktop Code tab). `./setup.sh` links each one into
-`~/.claude/skills/`, where Claude Code loads it as a plugin in every session; in
-a session that is already open, run `/reload-plugins` to pick up a new one.
+terminal and the desktop Code tab). This repo is a plugin marketplace,
+`theunisdk-ai-dev`, listing them.
+
+Anyone can install a mod from GitHub:
+
+```bash
+claude plugin marketplace add theunisdk/ai-dev
+claude plugin install session-board@theunisdk-ai-dev
+```
+
+Update later with `claude plugin marketplace update theunisdk-ai-dev`, or turn on
+auto-update for the marketplace under `/plugin` → Marketplaces.
+
+On a machine with this repo cloned, `./setup.sh` installs every mod from the
+checkout instead; Claude Code then reads them in place, so a `git pull` updates
+them. Either way, run `/reload-plugins` in a session that is already open.
+
+Mods need a recent Claude Code, and they don't load in WSL sessions of the
+desktop app — use a native Windows session there.
 
 | Mod | Purpose |
 |-----|---------|
