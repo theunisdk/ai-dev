@@ -67,8 +67,7 @@ tmux new-session -d -s <task>-$id -c <worktree-path> "claude --remote-control <t
 
 - Name workers `<task>-<id>` where `<id>` is this PM's 4-digit id (`serova-pm-4821` spawns
   `billing-4821`, `api-4821`). The shared id makes the family obvious in tmux, `ListAgents` and
-  the Claude app, and the `-pm-` session is the parent. Never put `-pm-` in a worker's name, and
-  keep digits out of `<task>` — the board groups a session by the first number in its name.
+  the Claude app, and the `-pm-` session is the parent. Never put `-pm-` in a worker's name.
 - Write that number into every later spawn. Each Bash call is a fresh shell, and re-running the
   lines above can mint a new family.
 - Workers can run a different model: `claude --model opus …`. The PM runs Fable for filtering;
