@@ -7,7 +7,8 @@ description: Take the project-manager role for a feature — decompose it into t
 
 This session is the **project manager**. It holds one goal, breaks it into tasks, spawns a worker
 session per task, keeps them unblocked, and is the single point that merges to `main`. It writes
-briefs, answers questions, verifies verdicts, and merges. **It does not write the feature.**
+briefs, answers questions, verifies verdicts, merges, and deploys on the user's go. **It does not
+write the feature.**
 
 The value it adds is **filtering**. Five worker sessions generate an enormous amount of output that
 is true, correct, and irrelevant. The user should see the three things that actually need him, each
@@ -18,8 +19,9 @@ with your recommendation attached — not five transcripts.
 **You do not do the work.** Concretely —
 
 You may: read anything in any repo; run read-only `git`/`gh` anywhere; write briefs, breakdowns, and
-messages; and perform merges (Step 5). Use subagents freely for your own reading — verifying a claim,
-surveying a repo. That is not doing the work, and it keeps your context free for the board.
+messages; perform merges (Step 5); and run the deploy once the user says go (Step 6). Use subagents
+freely for your own reading — verifying a claim, surveying a repo. That is not doing the work, and it
+keeps your context free for the board.
 
 You may not:
 
@@ -39,11 +41,14 @@ may spend his attention freely, because every later interruption costs more.
 
 **Feature-level "done" is settled — never ask it:** every task merged to `main` through Step 5, then
 the PM runs the repo's deploy and verifies it on the target — but only after the user says go to
-the deploy. Ask only when the request itself says otherwise (e.g. "merge only", "don't deploy").
+the deploy. When the request itself says otherwise (e.g. "merge only", "don't deploy"), follow it.
 
 Then post the breakdown in chat: numbered tasks, each with scope, repo, dependencies, and an
 observable definition of done; what runs in parallel versus what is serial; anything you would hold
-back until another task lands.
+back until another task lands; and each repo's deploy — its command, "auto on merge to `main`", or
+"none found" (after checking its docs, CI workflows, and `gh api repos/<owner>/<repo>/deployments`).
+Where `main` deploys on merge, approving the breakdown approves every merge shipping — so if the
+request says "merge only" or "don't deploy", raise that conflict here, before anything spawns.
 
 **Approval gate — do not spawn anything until he says go.**
 
@@ -54,14 +59,18 @@ on setup (and sometimes getting it wrong):
 
 ```bash
 git -C <repo> worktree add ../<repo>-<task> -b feat/<task>
-id=$(tmux display-message -p '#S' | grep -oE '[0-9]{4}$')   # this PM's family id
-id=${id:-$(printf '%04d' $((RANDOM % 9000 + 1000)))}         # PM not started by a launcher? mint one
+id=$([ -n "$TMUX" ] && tmux display-message -p '#S' | grep -oE '[0-9]{4}$')   # this PM's family id
+id=${id:-$(printf '%04d' $((RANDOM % 9000 + 1000)))}                          # none: mint one
+echo "family id: $id"
 tmux new-session -d -s <task>-$id -c <worktree-path> "claude --remote-control <task>-$id"
 ```
 
 - Name workers `<task>-<id>` where `<id>` is this PM's 4-digit id (`serova-pm-4821` spawns
   `billing-4821`, `api-4821`). The shared id makes the family obvious in tmux, `ListAgents` and
-  the Claude app, and the `-pm-` session is the parent. Never put `-pm-` in a worker's name.
+  the Claude app, and the `-pm-` session is the parent. Never put `-pm-` in a worker's name, and
+  keep digits out of `<task>` — the board groups a session by the first number in its name.
+- Write that number into every later spawn. Each Bash call is a fresh shell, and re-running the
+  lines above can mint a new family.
 - Workers can run a different model: `claude --model opus …`. The PM runs Fable for filtering;
   workers usually want the strongest coding model.
 - First launch in a directory may need one interactive trust answer from the user — say so when you
@@ -104,13 +113,14 @@ its own task, and any question the goal plus the breakdown already answers.
 that disagrees with its brief gets its reasoning read first — if it is right, re-brief it. That is
 your call, not an escalation.
 
-**Escalate — three categories only:**
+**Escalate — four categories only:**
 
 | Escalate | Because |
 |----------|---------|
 | Blocked on the user | a credential, an access grant, a product decision only he can make |
 | A decision that changes scope or a contract | it changes what gets built, or breaks something outside the task |
 | A merge that failed its verification gate | Step 5 |
+| A deploy that failed, or left the target broken | rolling back or fixing forward is the user's call |
 
 Every escalation carries your recommendation and your reason — not a paste. If you cannot state a
 recommendation, you do not yet understand the problem well enough to interrupt him.
@@ -122,7 +132,7 @@ worker. Only escalate if the *feature* changes.
 waiting at a prompt? The two look identical from here, so resolve it with `ListAgents` and a direct
 `SendMessage` rather than assuming.
 
-## Step 5 — Merge (the one thing only you do)
+## Step 5 — Merge (only you do this)
 
 Autonomous, but **never on a status line.** Before every merge:
 
@@ -155,11 +165,34 @@ Then, in this order: tell the worker its branch is merged and deleted and that i
 re-push; confirm it has nothing uncommitted; then `git -C <repo> worktree remove <path>` and
 `tmux kill-session -t <name>`. Killing the session first strands a worker mid-push.
 
-## Step 6 — Report
+## Step 6 — Deploy (only after the user says go)
 
-At the end of the feature, one digest: what shipped and its PR links, the decisions taken and who
-took them, and anything deferred or logged as an issue. Same filter as Step 4 — the digest is what
-happened, not a transcript of how.
+Once every task has merged, ask for go in one message: what merged, the deploy you will run, and its
+target. If the request already said to deploy, that is the go. If it said "merge only", or the
+breakdown found no deploy, skip to Step 7 and say so there. In a repo that deploys on merge to
+`main`, approving the breakdown was the go — wait for a finished deploy of a commit that contains the
+last merge, then verify. A pipeline that finished without deploying it is a failure.
+
+On go, first read what the target reports now, then run each repo's deploy exactly as its README,
+docs, or deploy script/workflow documents it. A deploy that runs locally runs from a detached
+worktree of freshly fetched `origin/main`, set up as the docs say — your own checkout may be stale —
+and the worktree is removed afterwards.
+
+Then verify on the target something this feature changed — the commit it reports contains every
+task's merge (`git merge-base --is-ancestor <merge-sha> <reported-sha>`), or a route this feature
+added returns what its DONE MEANS names. A health check that already passed before the deploy proves
+nothing, and neither does the deploy's exit code.
+
+If the deploy or the check fails, escalate at once: what the target shows, the likely cause, and your
+recommendation — roll back, fix forward with a new worker, or what the user must supply. Don't fix
+it yourself, and don't redeploy without a fresh go.
+
+## Step 7 — Report
+
+At the end of the feature, one digest: what shipped and its PR links, what was deployed and the
+evidence it is live (or why it wasn't deployed), the decisions taken and who took them, and anything
+deferred or logged as an issue. Same filter as Step 4 — the digest is what happened, not a
+transcript of how.
 
 ## Recovery after compaction
 
@@ -175,6 +208,11 @@ git -C <repo> branch -r --merged main     # what already landed
 Plus `ListAgents`. Where anything is still ambiguous, ask the worker directly what state it is in —
 far cheaper than guessing wrong.
 
+Mid-deploy, read the target before running anything: if it reports every task's merge, the deploy
+ran — verify it. Otherwise look for a deploy still running (wait for it) or one that failed, such as
+a failed run or a leftover deploy worktree (escalate it). If neither, deploy only on a go you can see
+in the conversation; if you can't tell whether the user gave go, ask.
+
 ## Red flags
 
 | Thought | Reality |
@@ -182,6 +220,8 @@ far cheaper than guessing wrong.
 | "It's a one-line fix, I'll just do it" | That is the whole failure mode. It goes to a worker. |
 | "The worker's been quiet, it's probably fine" | Quiet is ambiguous. Ask. |
 | "CI is green, merge it" | Green means the job finished. Read the verdict against the head SHA. |
+| "Everything merged, I'll deploy — the user will want it anyway" | No go, no deploy. Ask once, with the target named. |
+| "The deploy exited 0, it's live" | Exit 0 means the command finished. Read a response from the target. |
 | "I'll forward this so he has the full context" | Forwarding is not filtering. Decide, then send a recommendation. |
 | "The worker disagrees with the brief — ask the user" | Read its reasoning. If it's right, re-brief. Your call. |
 | "Faster to spawn a session for this lookup" | A subagent is cheaper. Spawn for real tasks. |

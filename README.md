@@ -31,7 +31,7 @@ Claude Code skills, authored here and symlinked into `~/.claude/skills/`. Highli
 | `review-kit-install` | Bootstrap + adapt the codex review kit into a repo that doesn't have it ("implement the review kit here") |
 | `tdk-1-start` | Session kickoff: load project context, confirm the starting branch |
 | `tdk-2-push-review` | Push → PR → CodeRabbit, capped at two fix rounds; every finding fixed, issue-logged, or rejected with a reason; pauses before merge |
-| `tdk-3-is-pm` | Take the PM role for a feature: decompose it, spawn a worker session per task, filter their reports, and own every merge to `main` |
+| `tdk-3-is-pm` | Take the PM role for a feature: decompose it, spawn a worker session per task, filter their reports, own every merge to `main`, and deploy on your go |
 
 Install all skills and mods on a machine: `./setup.sh` (idempotent — re-run after any
 pull; it symlinks every skill into `~/.claude/skills`, never clobbering a local copy
