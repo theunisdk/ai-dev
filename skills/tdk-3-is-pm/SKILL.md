@@ -59,24 +59,17 @@ on setup (and sometimes getting it wrong):
 
 ```bash
 git -C <repo> worktree add ../<repo>-<task> -b feat/<task>
-id=$([ -n "$TMUX" ] && tmux display-message -p '#S' | grep -oE '[0-9]{4}$')   # this PM's family id
-id=${id:-$(printf '%04d' $((RANDOM % 9000 + 1000)))}                          # none: mint one
-echo "family id: $id"
-tmux new-session -d -s <task>-$id -c <worktree-path> "claude --remote-control <task>-$id"
 ```
 
-- Name workers `<task>-<id>` where `<id>` is this PM's 4-digit id (`serova-pm-4821` spawns
-  `billing-4821`, `api-4821`). The shared id makes the family obvious in tmux, `ListAgents` and
-  the Claude app, and the `-pm-` session is the parent. Never put `-pm-` in a worker's name.
-- Write that number into every later spawn. Each Bash call is a fresh shell, and re-running the
-  lines above can mint a new family.
-- Workers can run a different model: `claude --model opus …`. The PM runs Fable for filtering;
-  workers usually want the strongest coding model.
-- First launch in a directory may need one interactive trust answer from the user — say so when you
-  spawn there.
+Then launch the worker in that worktree with the recipe in the global CLAUDE.md section **"Cross-repo
+work: spawn a full session in the target repo via tmux"**, with the worktree path as its `-c`
+directory. That section is the single source for the launch command, the family-id naming, and when
+not to spawn — follow it as written rather than from memory.
+
+- Workers can run a different model: add `--model opus` to the `claude` command. The PM runs Fable
+  for filtering; workers usually want the strongest coding model.
 - Only parallelise genuinely independent tasks. Two workers in the same file is a merge conflict you
   will have to bounce back.
-- Don't spawn a session for a lookup or a one-liner. A subagent is cheaper. Spawn for real tasks.
 
 ## Step 3 — The brief
 
@@ -98,8 +91,6 @@ contract. Not for progress.
 
 IF BLOCKED: say what you tried, what you need, and who or what can supply it.
 ```
-
-Don't tell it to run `tdk-1-start` — the SessionStart hook already does.
 
 ## Step 4 — Run the loop (this is the filtering job)
 
