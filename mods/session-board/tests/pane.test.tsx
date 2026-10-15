@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
-import { ALL_IDLE, LOCAL_ONLY, ONE_WAITING, TODAY, WORKER_WAITING } from './fixtures'
+import { ALL_IDLE, LOCAL_ONLY, NEW_NAMES, ONE_WAITING, TODAY, WORKER_WAITING } from './fixtures'
 
 const PANE = 'session-board'
 const PANE_PROPS = {
@@ -114,6 +114,16 @@ test('names the PM of a waiting worker', async ($, on) => {
   await openBoard($)
   const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS })
   expect((await ui.find({ key: 'wait-0' }))?.text).toMatch(/sec-2b-1774.*meeting-pm-1774-security/)
+})
+
+test('draws a new-style PM as the PM of its family', async ($, on) => {
+  engine(on, [{ listing: NEW_NAMES }])
+  await start($)
+  await openBoard($)
+  const ui = await $.ui.mount({ plugin: 'session-board', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS })
+  expect((await ui.find({ key: 'pm-4821-0' }))?.text).toMatch(/◆ 4821-PM-acme-client-ui-bug.*PM.*○ idle/)
+  expect((await ui.find({ key: 'worker-4821-1' }))?.text).toMatch(/└ 4821-api-add-endpoint.*● working/)
+  expect((await ui.find({ key: 'wait-0' }))?.text).toMatch(/4821-webapp-fix-js-validation.*4821-PM-acme-client-ui-bug/)
 })
 
 test('polls every 5 s and toasts a session that starts waiting, but not on the first poll', async ($, on) => {

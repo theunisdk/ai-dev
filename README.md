@@ -15,7 +15,7 @@ Ready-to-use prompts for common AI-assisted development tasks:
 | `generate_documents_prompt_v2.md` | Generate comprehensive project documentation from code |
 | `update_documents_prompt.md` | Update existing project documentation to match current code |
 | `pr_docs_review_prompt.md` | Review PR changes and update affected documentation |
-| `setup-session-orchestration-prompt.md` | Wire cross-repo session spawning (tmux + `--remote-control`) and the `tdk-1-start` SessionStart hook into a machine's global Claude Code config |
+| `setup-session-orchestration-prompt.md` | Wire launcher-based PM and worker sessions (worktrees in `.claude/worktrees/`) and the `tdk-1-start` SessionStart hook into a machine's global Claude Code config |
 
 ### [skills/](skills/)
 
@@ -63,7 +63,7 @@ desktop app — use a native Windows session there.
 
 | Mod | Purpose |
 |-----|---------|
-| `session-board` | `/board` opens a pane listing running sessions grouped under their PM (`<project>-pm-<number>-…`, workers carry the same number), with the ones waiting on you on top. The session showing it needs Remote Control on to see other machines |
+| `session-board` | `/board` opens a pane listing running sessions grouped under their PM (PMs `<code>-PM-<link>-<reason>`, workers `<code>-<repo>-<reason>` carrying the PM's code; legacy `<project>-pm-<number>-…` names, with workers carrying the number later in the name, still group), with the ones waiting on you on top. The session showing it needs Remote Control on to see other machines |
 
 ### [wsl-cli-tools/](wsl-cli-tools/)
 

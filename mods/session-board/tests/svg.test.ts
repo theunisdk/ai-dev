@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { buildBoard, parseListing } from '../hooks/board'
 import { drawBoard, groupColor } from '../hooks/svg'
-import { LOCAL_ONLY, ONE_WAITING, TODAY } from './fixtures'
+import { LOCAL_ONLY, NEW_NAMES, ONE_WAITING, TODAY } from './fixtures'
 
 const draw = (listing: string, width = 380) => drawBoard(buildBoard(parseListing(listing)), width)
 
@@ -24,6 +24,13 @@ describe('drawBoard', () => {
     expect(at('>meeting-pm-1774-security<')).toBeLessThan(at('>tektons-pm-9396-memebrdb<'))
     expect(at('>tektons-pm-9396-memebrdb<')).toBeLessThan(at('>serova-pm-5158-shane<'))
     expect(at('OTHER')).toBeGreaterThan(at('>serova-pm-5158-shane<'))
+  })
+
+  test('titles a new-style group by its PM and names that PM beside its waiting worker', () => {
+    const { source } = draw(NEW_NAMES, 640)
+    expect(source).toMatch(/class="title"[^>]*>4821-PM-acme-client-ui-bug</)
+    expect(source).toContain('>4821-webapp-fix-js-validation<tspan class="s" dx="10">4821-PM-acme-client-ui-bug</tspan>')
+    expect(source).toContain('>7310<tspan class="s" dx="8">no PM running</tspan>')
   })
 
   test('titles a group with no PM running by its number', () => {
