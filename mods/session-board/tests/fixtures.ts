@@ -55,3 +55,11 @@ Peer sessions (14):
   add-member-corova-5158 [a3632a]  ·  Remote Control  ·  idle
   sec-2b-1774 [3b5d6b]  ·  Remote Control  ·  idle
   tbagbuild [6213a5]  ·  Remote Control  ·  idle`
+
+export const NEW_NAMES = `Peer sessions (6):
+  4821-PM-acme-client-ui-bug [a1b2c3]  ·  Remote Control  ·  idle
+  4821-webapp-fix-js-validation [b2c3d4]  ·  Remote Control  ·  requires_action
+  4821-api-add-endpoint [c3d4e5]  ·  Remote Control  ·  busy
+  meeting-pm-1774-security [568b57]  ·  Remote Control  ·  idle
+  sec-2b-1774 [3b5d6b]  ·  Remote Control  ·  idle
+  7310-docs-board-names [d4e5f6]  ·  Remote Control  ·  idle`

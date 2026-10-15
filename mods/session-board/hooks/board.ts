@@ -5,6 +5,7 @@ const ROW = /^\s*(?:[-*]\s+)?(.+?)(?: \[[^\]]+\])?\s+·\s+(.+?)\s+·\s+([^\s·]+
 const HEADER = /^(\S.*?) \(\d+\):$/
 const SKIPPED_SECTION = /^(subagents|teammates)/i
 const NUMBER = /^\d{3,}$/
+const FAMILY_CODE = /^\d{4}$/
 
 const STATES: Record<string, SessionState> = {
   busy: 'working',
@@ -41,6 +42,8 @@ export function parseListing(listing: string): Session[] {
 
 export function groupOf(name: string): { number: string; isPm: boolean } | null {
   const tokens = name.split('-')
+  const [first = '', second = ''] = tokens
+  if (FAMILY_CODE.test(first)) return { number: first, isPm: second.toLowerCase() === 'pm' }
   for (let i = 0; i + 1 < tokens.length; i++) {
     const next = tokens[i + 1] ?? ''
     if (tokens[i]?.toLowerCase() === 'pm' && NUMBER.test(next)) return { number: next, isPm: true }

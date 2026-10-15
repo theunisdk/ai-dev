@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { buildBoard, groupOf, newlyWaiting, parseListing } from '../hooks/board'
-import { ALL_IDLE, LOCAL_ONLY, ONE_WAITING, TODAY, WORKER_WAITING } from './fixtures'
+import { ALL_IDLE, LOCAL_ONLY, NEW_NAMES, ONE_WAITING, TODAY, WORKER_WAITING } from './fixtures'
 
 describe('parseListing', () => {
   test('reads every peer row and skips the header lines', () => {
@@ -110,9 +110,23 @@ Cloud sessions (1):
 })
 
 describe('groupOf', () => {
-  test('finds the PM by its pm-<number> token', () => {
+  test('finds the PM by a leading code followed by PM', () => {
+    expect(groupOf('1234-PM-acme-client-ui-bug')).toEqual({ number: '1234', isPm: true })
+    expect(groupOf('1234-pm-acme-session')).toEqual({ number: '1234', isPm: true })
+    expect(groupOf('1234-Pm-esp32-9999-session')).toEqual({ number: '1234', isPm: true })
+  })
+
+  test('puts a session with a leading code alone in that family as a worker', () => {
+    expect(groupOf('1234-webapp-fix-js-validation')).toEqual({ number: '1234', isPm: false })
+    expect(groupOf('1234-api-pm-5678-tool')).toEqual({ number: '1234', isPm: false })
+    expect(groupOf('1234-pmtools-fix')).toEqual({ number: '1234', isPm: false })
+  })
+
+  test('finds a legacy PM by its pm-<number> token', () => {
     expect(groupOf('serova-pm-5158-shane')).toEqual({ number: '5158', isPm: true })
     expect(groupOf('PM-1774-security')).toEqual({ number: '1774', isPm: true })
+    expect(groupOf('123-notes-pm-5158')).toEqual({ number: '5158', isPm: true })
+    expect(groupOf('20261015-notes-pm-5158')).toEqual({ number: '5158', isPm: true })
   })
 
   test('puts a worker in the group of its first 3+ digit token', () => {
@@ -165,6 +179,21 @@ describe('buildBoard', () => {
       parseListing('  a-pm-1234 [1]  ·  Remote Control  ·  idle\n  b-pm-1234 [2]  ·  Remote Control  ·  idle'),
     )
     expect(board.groups[0]?.pms.map(s => s.name)).toEqual(['a-pm-1234', 'b-pm-1234'])
+  })
+
+  test('groups new-style names beside legacy ones', () => {
+    const board = buildBoard(parseListing(NEW_NAMES))
+    expect(
+      board.groups.map(g => [g.number, g.pms.map(s => s.name), g.workers.map(s => s.name)]),
+    ).toEqual([
+      ['4821', ['4821-PM-acme-client-ui-bug'], ['4821-webapp-fix-js-validation', '4821-api-add-endpoint']],
+      ['1774', ['meeting-pm-1774-security'], ['sec-2b-1774']],
+      ['7310', [], ['7310-docs-board-names']],
+    ])
+    expect(board.needsYou.map(n => [n.session.name, n.pmName])).toEqual([
+      ['4821-webapp-fix-js-validation', '4821-PM-acme-client-ui-bug'],
+    ])
+    expect(board.other).toEqual([])
   })
 
   test('says when no Remote Control session is listed', () => {
