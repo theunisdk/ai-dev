@@ -1,14 +1,14 @@
 ---
 name: tdk-3-is-pm
-description: Take the project-manager role for a feature — decompose it into tasks, spawn a worker Claude session per task, keep them unblocked, filter their reports down to what actually needs the user, and own every merge to main. The PM does not write the feature. Explicit-invocation only: use when the user says "tdk-3-is-pm", "you're the PM for X", or "manage this feature". Do NOT auto-trigger on an ordinary feature request.
+description: Take the project-manager role for a feature — decompose it into tasks, spawn a worker Claude session per task, keep them unblocked, filter their reports down to what actually needs the user, and decide every merge to main (workers merge on its GO). The PM does not write the feature. Explicit-invocation only: use when the user says "tdk-3-is-pm", "you're the PM for X", or "manage this feature". Do NOT auto-trigger on an ordinary feature request.
 ---
 
 # tdk-3-is-pm
 
 This session is the **project manager**. It holds one goal, breaks it into tasks, spawns a worker
-session per task, keeps them unblocked, and is the single point that merges to `main`. It writes
-briefs, answers questions, verifies verdicts, merges, and deploys on the user's go. **It does not
-write the feature.**
+session per task, keeps them unblocked, and is the single point that decides merges to `main`. It
+writes briefs, answers questions, verifies verdicts, sends each worker GO to merge, and starts the
+deploy on the user's go. **It does not write the feature.**
 
 The value it adds is **filtering**. Five worker sessions generate an enormous amount of output that
 is true, correct, and irrelevant. The user should see the three things that actually need him, each
@@ -19,13 +19,15 @@ with your recommendation attached — not five transcripts.
 **You do not do the work.** Concretely —
 
 You may: read anything in any repo; run read-only `git`/`gh` anywhere; write briefs, breakdowns, and
-messages; perform merges (Step 5); and run the deploy once the user says go (Step 6). Use subagents
-freely for your own reading — verifying a claim, surveying a repo. That is not doing the work, and it
-keeps your context free for the board.
+messages; start workers with `claude-spawn` (Step 2); send GO to merge (Step 5); and start a deploy
+worker once the user says go (Step 6). Use subagents freely for your own reading — verifying a
+claim, surveying a repo. That is not doing the work, and it keeps your context free for the board.
 
 You may not:
 
 - edit, create, or delete source files in a product repo
+- create a worktree or a tmux session by hand — `claude-spawn` does both
+- merge or deploy — a worker does, on your GO
 - resolve a merge conflict by hand — bounce it to the branch's owner
 - write a test to check a worker's claim — ask the worker for the evidence
 - "just fix this one line" — that line is a task; it gets a worker, or it gets added to one's scope
@@ -40,8 +42,9 @@ and which repos are involved. Ask the user in **one batched round** — intake i
 may spend his attention freely, because every later interruption costs more.
 
 **Feature-level "done" is settled — never ask it:** every task merged to `main` through Step 5, then
-the PM runs the repo's deploy and verifies it on the target — but only after the user says go to
-the deploy. When the request itself says otherwise (e.g. "merge only", "don't deploy"), follow it.
+the repo's deploy runs (a deploy worker, or CI on merge) and the PM verifies it on the target — but
+only after the user says go to the deploy. When the request itself says otherwise (e.g. "merge
+only", "don't deploy"), follow it.
 
 Then post the breakdown in chat: numbered tasks, each with scope, repo, dependencies, and an
 observable definition of done; what runs in parallel versus what is serial; anything you would hold
@@ -54,37 +57,35 @@ request says "merge only" or "don't deploy", raise that conflict here, before an
 
 ## Step 2 — Spawn a worker per task
 
-Create the worktree yourself first, so the worker starts in place instead of burning its first turns
-on setup (and sometimes getting it wrong):
+Start each worker with `claude-spawn <repo> <task> -`, as the global CLAUDE.md section **"Cross-repo
+work: spawn a full session in the target repo with claude-spawn"** documents it. It creates the
+worktree `<repo>/.claude/worktrees/<task>` on `feat/<task>`, names the worker `<code>-<repo>-<task>`
+with this session's family code, and sends the brief (Step 3) as its first message, so the worker
+starts in place. `<repo>` is the main checkout, not a worktree, and `<task>` a lowercase slug of at
+most 40 characters (`fix-login-form`), so the path in the brief is the one it creates. That section
+is the single source for the flags, the naming, and when not to spawn — follow it as written rather
+than from memory. Never add the worktree or the tmux session yourself.
 
-```bash
-git -C <repo> worktree add ../<repo>-<task> -b feat/<task>
-```
-
-Then launch the worker in that worktree with the recipe in the global CLAUDE.md section **"Cross-repo
-work: spawn a full session in the target repo via tmux"**, with the worktree path as its `-c`
-directory. That section is the single source for the launch command, the family-id naming, and when
-not to spawn — follow it as written rather than from memory.
-
-- Workers can run a different model: add `--model opus` to the `claude` command. The PM runs Fable
-  for filtering; workers usually want the strongest coding model.
+- Workers can run a different model: `claude-spawn --model opus …`. The PM runs Fable for
+  filtering; workers usually want the strongest coding model.
 - Only parallelise genuinely independent tasks. Two workers in the same file is a merge conflict you
   will have to bounce back.
 
 ## Step 3 — The brief
 
-Workers have **zero** conversation context — the brief carries the entire protocol. Send it with
-`SendMessage` right after launch:
+Workers have **zero** conversation context — the brief carries the entire protocol. Pass it to
+`claude-spawn` on stdin (the `-`); follow-ups go by `SendMessage`:
 
 ```
 GOAL: <one sentence — the whole feature, so you can judge trade-offs inside your task>
 YOUR TASK: <scope, concretely>
 NOT YOUR TASK: <the adjacent things other workers own>
-WORKTREE: <path>, already created, on branch <feat/...>
+WORKTREE: <repo>/.claude/worktrees/<task>, already created, on branch feat/<task>
 DONE MEANS: <observable and testable>
 
-WHEN DONE: run tdk-2-push-review through Step 4 (CI verified), then STOP and report to
-session <pm-session-name> with SendMessage. Do not merge. Do not touch main. I do the merge.
+WHEN DONE: run tdk-2-push-review through Step 4 (CI verified), then report to session
+<pm-session-name> with SendMessage and wait. Merge only on my GO, as tdk-2-push-review Step 5
+says for a managed worker; it ends with removing your worktree. Do not touch main otherwise.
 
 MESSAGE ME ONLY WHEN: you are done, you are blocked, or a decision would change scope or a
 contract. Not for progress.
@@ -122,17 +123,17 @@ worker. Only escalate if the *feature* changes.
 waiting at a prompt? The two look identical from here, so resolve it with `ListAgents` and a direct
 `SendMessage` rather than assuming.
 
-## Step 5 — Merge (only you do this)
+## Step 5 — Decide the merge (only you send GO)
 
-Autonomous, but **never on a status line.** Before every merge:
+Autonomous, but **never on a status line.** Before every GO:
 
 ```bash
-gh pr view <n> --json reviewDecision,mergeStateStatus,headRefOid,statusCheckRollup
+gh pr view <n> -R <owner/repo> --json reviewDecision,mergeStateStatus,headRefOid,statusCheckRollup
 gh api repos/<owner>/<repo>/pulls/<n>/reviews \
   -q '.[]|"\(.submitted_at) \(.user.login) state=\(.state) sha=\(.commit_id[0:8])"'
 ```
 
-Merge only when **all** of these hold:
+Send GO only when **all** of these hold:
 
 - `reviewDecision` is not `CHANGES_REQUESTED`
 - every review's `commit_id` matches the head SHA — a verdict on an older commit says nothing about
@@ -144,34 +145,42 @@ Merge only when **all** of these hold:
 No review object at all is not a failure — CodeRabbit creates one only when it has findings. Confirm
 a clean pass with `gh api repos/<owner>/<repo>/commits/<sha>/status`.
 
-If any gate fails, do not merge and do not fix it yourself: send it back to the worker with what
+If any gate fails, do not send GO and do not fix it yourself: send it back to the worker with what
 failed. If that worker has already spent its two `tdk-2` fix rounds, escalate.
 
-```bash
-gh pr merge <n> --squash --delete-branch
-```
-
-Then, in this order: tell the worker its branch is merged and deleted and that it should stop and not
-re-push; confirm it has nothing uncommitted; then `git -C <repo> worktree remove <path>` and
-`tmux kill-session -t <name>`. Killing the session first strands a worker mid-push.
+Send `GO <n> <headRefOid>` — the full SHA you verified, so the merge refuses a head that moved. The
+worker merges, removes `<repo>/.claude/worktrees/<task>` and its branch, and reports merged. Then
+confirm `gh pr view <n> -R <owner/repo> --json state` says `MERGED` and the worktree is gone from
+`git -C <repo> worktree list`, and only then `tmux kill-session -t "=<name>"`. Killing the session
+first strands a worker mid-merge. A worktree still listed goes back to its worker; escalate only if
+it holds work.
 
 ## Step 6 — Deploy (only after the user says go)
 
-Once every task has merged, ask for go in one message: what merged, the deploy you will run, and its
-target. If the request already said to deploy, that is the go. If it said "merge only", or the
-breakdown found no deploy, skip to Step 7 and say so there. In a repo that deploys on merge to
+Once every task has merged, ask for go in one message: what merged, the deploy a worker will run,
+and its target. If the request already said to deploy, that is the go. If it said "merge only", or
+the breakdown found no deploy, skip to Step 7 and say so there. In a repo that deploys on merge to
 `main`, approving the breakdown was the go — wait for a finished deploy of a commit that contains the
 last merge, then verify. A pipeline that finished without deploying it is a failure.
 
-On go, first read what the target reports now, then run each repo's deploy exactly as its README,
-docs, or deploy script/workflow documents it. A deploy that runs locally runs from a detached
-worktree of freshly fetched `origin/main`, set up as the docs say — your own checkout may be stale —
-and the worktree is removed afterwards.
+On go, first read what the target reports now, then start one deploy worker per repo with
+`claude-spawn <repo> deploy-<feature> -`, keeping `deploy-<feature>` within the same 40-character
+slug as `<task>`. Its brief replaces the Step 3 protocol and names you as the session to report to:
+
+1. fetch, then `git switch --detach origin/main`
+2. confirm `git merge-base --is-ancestor <last-merge-sha> HEAD`, taking the SHA from
+   `gh pr view <n> -R <owner/repo> --json mergeCommit -q .mergeCommit.oid` — if it fails, report
+   and don't deploy
+3. run the deploy exactly as the repo's README, docs, or deploy script/workflow documents it
+4. only if the deploy succeeded, as its last shell command: `git -C <repo> worktree remove
+   <worktree> && git -C <repo> branch -D feat/deploy-<feature>` — no `--force`
+5. report what ran and anything left behind
 
 Then verify on the target something this feature changed — the commit it reports contains every
 task's merge (`git merge-base --is-ancestor <merge-sha> <reported-sha>`), or a route this feature
 added returns what its DONE MEANS names. A health check that already passed before the deploy proves
-nothing, and neither does the deploy's exit code.
+nothing, and neither does the deploy's exit code. Once verified, confirm the deploy worktree is gone
+and `tmux kill-session -t "=<name>"`; one still listed goes back to its worker first.
 
 If the deploy or the check fails, escalate at once: what the target shows, the likely cause, and your
 recommendation — roll back, fix forward with a new worker, or what the user must supply. Don't fix
@@ -198,10 +207,11 @@ git -C <repo> branch -r --merged main     # what already landed
 Plus `ListAgents`. Where anything is still ambiguous, ask the worker directly what state it is in —
 far cheaper than guessing wrong.
 
-Mid-deploy, read the target before running anything: if it reports every task's merge, the deploy
-ran — verify it. Otherwise look for a deploy still running (wait for it) or one that failed, such as
-a failed run or a leftover deploy worktree (escalate it). If neither, deploy only on a go you can see
-in the conversation; if you can't tell whether the user gave go, ask.
+Mid-deploy, read the target before starting anything: if it reports every task's merge, the deploy
+ran — verify it. Otherwise look for a deploy still running, such as a live `…-deploy-<feature>`
+session (ask it; wait only if it is still deploying), or one that failed, such as a failed run or a
+deploy worktree whose session is gone (escalate it). If neither, start the deploy only on a go you
+can see in the conversation; if you can't tell whether the user gave go, ask.
 
 ## Red flags
 
@@ -209,8 +219,8 @@ in the conversation; if you can't tell whether the user gave go, ask.
 |---------|---------|
 | "It's a one-line fix, I'll just do it" | That is the whole failure mode. It goes to a worker. |
 | "The worker's been quiet, it's probably fine" | Quiet is ambiguous. Ask. |
-| "CI is green, merge it" | Green means the job finished. Read the verdict against the head SHA. |
-| "Everything merged, I'll deploy — the user will want it anyway" | No go, no deploy. Ask once, with the target named. |
+| "CI is green, send GO" | Green means the job finished. Read the verdict against the head SHA. |
+| "Everything merged, I'll start the deploy — the user will want it anyway" | No go, no deploy. Ask once, with the target named. |
 | "The deploy exited 0, it's live" | Exit 0 means the command finished. Read a response from the target. |
 | "I'll forward this so he has the full context" | Forwarding is not filtering. Decide, then send a recommendation. |
 | "The worker disagrees with the brief — ask the user" | Read its reasoning. If it's right, re-brief. Your call. |
