@@ -17,6 +17,7 @@ Three pieces make it work without re-derivation every time:
 - tmux installed.
 - The `tdk-1-start` skill present in `~/.claude/skills/` — run this repo's `setup.sh` first if it isn't.
 - A **worker launcher** on `PATH`, taking `<repo-path> <reason>` and a brief on stdin. It must:
+  - reject a `<reason>` that is not one kebab-case token (`[a-z0-9-]+`), since it becomes a path segment, a branch name and part of the session name;
   - name the worker `<code>-<repo>-<reason>`, where `<code>` is the spawning session's 4-digit family code, read from the spawning session's own name (mint a fresh one if that name has none);
   - create the worktree at `<repo>/.claude/worktrees/<reason>` on branch `feat/<reason>`, branched from origin's default branch (local HEAD when there is no origin);
   - launch in place, with no new worktree, when `<repo-path>` is already a linked worktree;
