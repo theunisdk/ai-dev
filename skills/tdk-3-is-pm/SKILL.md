@@ -164,8 +164,8 @@ the breakdown found no deploy, skip to Step 7 and say so there. In a repo that d
 last merge, then verify. A pipeline that finished without deploying it is a failure.
 
 On go, first read what the target reports now, then start one deploy worker per repo with
-`claude-spawn <repo> deploy-<feature> -`. Its brief replaces the Step 3 protocol and names you as
-the session to report to:
+`claude-spawn <repo> deploy-<feature> -`, keeping `deploy-<feature>` within the same 40-character
+slug as `<task>`. Its brief replaces the Step 3 protocol and names you as the session to report to:
 
 1. fetch, then `git switch --detach origin/main`
 2. confirm `git merge-base --is-ancestor <last-merge-sha> HEAD`, taking the SHA from
