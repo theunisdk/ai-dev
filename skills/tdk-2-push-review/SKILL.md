@@ -89,12 +89,15 @@ The Lint & Test check is **not** a required status check in this repo, so it won
 Solo or managed, record what CodeRabbit caught that the local review missed. Run it in this worktree, where `/review` ran. First check that the kit's command can run unattended:
 ```bash
 if ! top="$(git rev-parse --show-toplevel)"; then echo "review-postmortem: failed — version check: git rev-parse failed"
-elif f="$top/.claude/commands/review-postmortem.md"; [ ! -e "$f" ] && [ ! -L "$f" ] && { [ ! -e "${f%/*}" ] || [ -x "${f%/*}" ]; }; then echo "review-postmortem: skipped — no review kit in this repo"
-else grep -qF -e 'review-postmortem:v1' -e '--record-only' "$f"; case $? in
-  0) echo "run" ;;
-  1) echo "review-postmortem: skipped — kit too old for automatic postmortem; sync the kit" ;;
-  *) echo "review-postmortem: failed — version check: cannot read $f" ;;
-esac; fi
+else f="$top/.claude/commands/review-postmortem.md"
+  if { [ -e "$top/.claude" ] && [ ! -x "$top/.claude" ]; } || { [ -e "${f%/*}" ] && [ ! -x "${f%/*}" ]; }; then echo "review-postmortem: failed — version check: cannot search $top/.claude"
+  elif [ ! -e "$f" ] && [ ! -L "$f" ]; then echo "review-postmortem: skipped — no review kit in this repo"
+  else grep -qF -e 'review-postmortem:v1' -e '--record-only' "$f"; case $? in
+    0) echo "run" ;;
+    1) echo "review-postmortem: skipped — kit too old for automatic postmortem; sync the kit" ;;
+    *) echo "review-postmortem: failed — version check: cannot read $f" ;;
+  esac; fi
+fi
 ```
 Only on `run`, invoke `/review-postmortem <PR> --record-only`. Always pass `--record-only`; without it the command waits for approval. Its first line is `review-postmortem: scored | no-local-verdict | skipped | failed — …`, and after scored or no-local-verdict a `review-postmortem: record — …` line follows. If it prints no such first line, your line is `review-postmortem: failed — no status line`.
 
