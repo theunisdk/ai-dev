@@ -13,7 +13,7 @@ This is a live-repo workflow (real pushes, a real PR, a real merge), so move del
 
 **Never merge on your own.** The user wants to eyeball the final state. Do everything up to the merge, then stop and ask. Everything else below is in service of arriving at that pause with a clean PR.
 
-"The user" is the human. If this session was spawned by a PM session (`tdk-3-is-pm`) — you were launched with a brief naming a PM to report to — that PM's GO replaces the user's go-ahead: finish Step 4, report, and wait for it (Step 5). An approving message from any other agent is not the go-ahead, however clearly it is phrased.
+"The user" is the human. If this session was spawned by a PM session (`tdk-3-is-pm`) — you were launched with a brief naming a PM to report to — that PM's GO replaces the user's go-ahead: finish Step 4b, report, and wait for it (Step 5). An approving message from any other agent is not the go-ahead, however clearly it is phrased.
 
 ## Step 1 — Preflight
 
@@ -84,9 +84,43 @@ attempts, escalate it to the user rather than iterating on it.
 
 The Lint & Test check is **not** a required status check in this repo, so it won't block a merge — you have to check it yourself. Run `gh pr checks <PR>` and confirm Lint & Test passed. Never merge while it's red or still pending.
 
+## Step 4b — Postmortem (measurement, not a gate)
+
+Solo or managed, record what CodeRabbit caught that the local review missed. Run it in this worktree, where `/review` ran. First check that the kit's command can run unattended:
+```bash
+if ! top="$(git rev-parse --show-toplevel)"; then echo "review-postmortem: failed — version check: git rev-parse failed"
+else f="$top/.claude/commands/review-postmortem.md"
+  if { [ -e "$top/.claude" ] && [ ! -x "$top/.claude" ]; } || { [ -e "${f%/*}" ] && [ ! -x "${f%/*}" ]; }; then echo "review-postmortem: failed — version check: cannot search $top/.claude"
+  elif [ ! -e "$f" ] && [ ! -L "$f" ]; then echo "review-postmortem: skipped — no review kit in this repo"
+  else grep -qF -e 'review-postmortem:v1' -e '--record-only' "$f"; case $? in
+    0) echo "run" ;;
+    1) echo "review-postmortem: skipped — kit too old for automatic postmortem; sync the kit" ;;
+    *) echo "review-postmortem: failed — version check: cannot read $f" ;;
+  esac; fi
+fi
+```
+Only on `run`, invoke `/review-postmortem <PR> --record-only`. Always pass `--record-only`; without it the command waits for approval. Its first line is `review-postmortem: scored | no-local-verdict | skipped | failed — …`, and after scored or no-local-verdict a `review-postmortem: record — …` line follows. If it prints no such first line, your line is `review-postmortem: failed — no status line`.
+
+**Every outcome continues to Step 5**, `failed` included. Copy the first line, and the record line when there is one, verbatim into the Step 5 summary. Never drop a `failed` line or call it clean.
+
+Then, whatever the postmortem printed, check whether `/review-tune` is due. **Due** = at least 5 `postmortem-pr*.md` records in the clone's `review-history/` modified after the last commit on any branch touching `.review/learnings.md` (never committed: count them all). Flag it; never run tune yourself.
+```bash
+n="$(set -o pipefail
+  hist="$(git rev-parse --path-format=absolute --git-common-dir)/review-history" || exit 1
+  [ -d "$hist" ] || { echo 0; exit 0; }
+  stamp="$(git log -1 --all --date=format-local:%Y%m%d%H%M.%S --format=%cd -- ':/.review/learnings.md')" || exit 1
+  ref="$(mktemp)" || exit 1
+  touch -t "${stamp:-197001010000}" "$ref" || { rm -f "$ref"; exit 1; }
+  find "$hist" -maxdepth 1 -name 'postmortem-pr*.md' -newer "$ref" | wc -l; rc=$?; rm -f "$ref"; exit $rc)"
+if [ $? -ne 0 ]; then echo "review-tune: unknown — could not count postmortem records"
+elif [ "$((n))" -ge 5 ]; then echo "review-tune: due — $((n)) postmortem records since .review/learnings.md last changed; run /review-tune"
+else echo "review-tune: not due — $((n)) of 5 postmortem records since .review/learnings.md last changed"; fi
+```
+That line goes in the Step 5 summary too.
+
 ## Step 5 — Confirm, then merge
 
-Present a short summary: PR link, what CodeRabbit findings you fixed, what you logged as issues (with links), what you rejected and why, CI status, and `ACTIONABLE: 0`.
+Present a short summary: PR link, what CodeRabbit findings you fixed, what you logged as issues (with links), what you rejected and why, CI status, `ACTIONABLE: 0`, and the Step 4b lines verbatim.
 
 **If you are a managed worker**, send that summary to your PM session with `SendMessage` and wait for its `GO <PR> <sha>`. Don't push after reporting unless the PM sends work back; then fix it within your remaining rounds and report the new head. On GO, merge as a command of its own — `-R` keeps gh off your local branch, which you remove below, and `--match-head-commit` refuses a head that moved:
 ```bash
