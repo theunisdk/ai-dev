@@ -84,8 +84,10 @@ WORKTREE: <repo>/.claude/worktrees/<task>, already created, on branch feat/<task
 DONE MEANS: <observable and testable>
 
 WHEN DONE: run tdk-2-push-review through Step 4b (CI verified, postmortem run), then report to
-session <pm-session-name> with SendMessage and wait. The report quotes the `review-postmortem:`
-and `review-tune:` lines verbatim, whatever they say. Merge only on my GO, as tdk-2-push-review Step 5
+session <pm-session-name> with SendMessage and wait. In a repo with the review kit, the pre-PR
+review is the kit's `/review`, not a subagent review (tdk-2-push-review Step 1b). The report quotes
+the `pre-pr-review:` line (the `/review` verdict SHA, or subagent/fallback and why), the `review-postmortem:`
+and the `review-tune:` lines verbatim, whatever they say. Merge only on my GO, as tdk-2-push-review Step 5
 says for a managed worker; it ends with removing your worktree. Do not touch main otherwise.
 
 MESSAGE ME ONLY WHEN: you are done, you are blocked, or a decision would change scope or a
@@ -142,10 +144,11 @@ Send GO only when **all** of these hold:
 - CI passed on its own terms: read the job result, not the check's conclusion. A job that is green
   because every step was skipped is not a pass.
 - the worker reported `ACTIONABLE: 0` along with its dispositions
-- the report carries the `review-postmortem:` first line, the `record` line after `scored` or
-  `no-local-verdict`, and the `review-tune:` line. Any outcome passes, `failed` included: the
-  postmortem is measurement. Only a missing line holds GO; ask for it. Carry any `failed`,
-  `NOT posted`, `NOT written`, `review-tune: unknown` or `review-tune: due` into the Step 7 digest.
+- the report carries the `pre-pr-review:` line, the `review-postmortem:` first line, the `record`
+  line after `scored` or `no-local-verdict`, and the `review-tune:` line. Any outcome passes,
+  `failed` included: the postmortem is measurement. A missing line holds GO; ask for it.
+  `pre-pr-review: stale` holds GO; send it back to review the head. Carry any `pre-pr-review: fallback` or `incomplete`, `failed`, `NOT posted`,
+  `NOT written`, `review-tune: unknown` or `review-tune: due` into the Step 7 digest.
 
 No review object at all is not a failure — CodeRabbit creates one only when it has findings. Confirm
 a clean pass with `gh api repos/<owner>/<repo>/commits/<sha>/status`.

@@ -19,7 +19,49 @@ This is a live-repo workflow (real pushes, a real PR, a real merge), so move del
 
 - `git status` and `git branch --show-current`. If you're on `main`, stop — there's nothing to open a PR for. Ask the user what branch they meant.
 - If there are uncommitted changes, commit them following the repo's Conventional Commits style (`feat(scope): …`, `fix(scope): …`, `chore(scope): …`). If `settings.json` is among the changes, commit it too — the project requires it.
-- Push: `git push -u origin HEAD`.
+
+## Step 1b — Pre-PR review, then push
+
+Detect the review kit:
+```bash
+if ! top="$(git rev-parse --show-toplevel)"; then echo "pre-pr-review: fallback — kit detection failed: git rev-parse failed"
+else bad=""; miss=""
+  for d in .claude .claude/commands scripts .review; do
+    if [ -e "$top/$d" ] && [ ! -x "$top/$d" ]; then bad="$d"; fi
+  done
+  for f in .claude/commands/review.md scripts/review.sh .review/adjudication.md; do
+    if [ ! -e "$top/$f" ]; then miss="$miss $f"; elif [ ! -r "$top/$f" ]; then bad="$f"; fi
+  done
+  if [ -n "$bad" ]; then echo "pre-pr-review: fallback — kit detection failed: cannot read $top/$bad"
+  elif [ -z "$miss" ]; then echo "kit"
+  elif [ "$miss" = " .claude/commands/review.md scripts/review.sh .review/adjudication.md" ]; then echo "pre-pr-review: subagent — no review kit in this repo"
+  else echo "pre-pr-review: fallback — partial review kit, missing:$miss"; fi
+fi
+```
+On `kit`, the pre-PR review **is** the kit's `/review`; it replaces the subagent review. Otherwise the printed line is your `pre-pr-review:` line: run the subagent review from the global CLAUDE.md ("Before pushing a branch or opening a PR"), then push.
+
+In a kit repo:
+
+1. `git fetch origin`, then `/review origin/main` — the PR's base (Step 2). Adjudicate exactly as `.review/adjudication.md` says — verify, classify, commit the fixes, its one scoped re-review if they are substantial, and `.review/verdict.md` last. ESCALATEs go to the user (a managed worker: its PM) before the push. Exit 2 means findings at `--fail-on`: adjudicate them like any others.
+2. **A run you can't trust is not a pass.** If `review.sh` exits anything but 0 or 2 (codex missing, auth, quota, script error), or `.review/findings.json` is missing or unreadable, the run failed. Fix the cause if you can without the user (`codex login` is interactive, so not that). Otherwise this replaces adjudication step 1's "stop": say so, run the subagent review instead, skip item 3, and push on the line `pre-pr-review: fallback — /review failed: <why>`. A failed run's `findings.json` can still carry a `gitleaks` finding or `secrets_scan: leaks`: act on it before any push, fallback or not.
+   `changed_files: 0` reviewed nothing: fix the base and re-run, and write no verdict. `complete: false` with `unreadable_paths`: make them readable and re-run; never keep that verdict. Otherwise (failed lenses, a failed secret scan) fix the cause and re-run once; if it is still incomplete, keep the verdict, and once item 3 prints `covers`, report it as `pre-pr-review: /review incomplete — verdict <sha> covers HEAD; <unfinished lenses: … | secrets scan: failed>`. Add `secrets: not_scanned` to whichever line you report when it applies.
+3. Check that the verdict names the HEAD you are about to push:
+   ```bash
+   f="$(git rev-parse --show-toplevel)/.review/verdict.md"; h="$(git rev-parse HEAD)" || h=""
+   if [ ! -e "$f" ]; then v="missing"
+   else v="$(awk -F ' — ' -v title=1 -v rev=3 'NR == 1 && NF == 4 && $title == "# Review verdict" && $rev ~ /^[0-9a-f]+$/ && length($rev) >= 4 { print $rev }' "$f")" || v="unreadable"; fi
+   case "$h" in
+     "${v:-none}"*) echo "pre-pr-review: /review — verdict $v covers HEAD" ;;
+     *) echo "pre-pr-review: stale — verdict ${v:-has no review header} does not cover ${h:-HEAD (git rev-parse failed)}" ;;
+   esac
+   ```
+   On `stale`, never edit the header alone; fix it per the kit and check again:
+   - `missing`, `unreadable` or no header: finish item 1, or re-run `/review origin/main`.
+   - a SHA, and `git merge-base --is-ancestor <sha> HEAD` succeeds: commits landed after the verdict. Treat them as adjudication step 4 fix commits — `/review <sha> --lenses <relevant lenses>`, then rewrite the verdict per step 5 with its rows added, so it names the new HEAD.
+   - a SHA that is not an ancestor (an amend or rebase rewrote it): re-run `/review origin/main` in full.
+4. Push only on a `pre-pr-review:` line that is not `stale`: `git push -u origin HEAD`.
+
+The first head CodeRabbit reviews is the one Step 4b's postmortem scores, so its verdict must name exactly that commit.
 
 ## Step 2 — Open (or reuse) the PR
 
@@ -61,16 +103,24 @@ fresh review surface, so round N's hasty fixes become round N+1's findings.
      the justification lives in the PR reply (see CLAUDE.md).
    - **Nitpicks (🧹) and trivial style points are out of scope** — the script
      already filters them out. Don't chase them.
-5. **One batch, one push.** Apply all of the round's (a) fixes together. If
-   the batch is substantial (new logic, changed transaction/authz boundaries —
-   not mechanical one-liners), run a scoped local review over it first
-   (`/review --uncommitted`, or the relevant lenses) so the *fixes* have been
-   reviewed before CodeRabbit sees them — unreviewed fix commits are where
-   the next round's "major" findings come from. Then check the build locally
-   (`pnpm lint`, and `pnpm test` if the changes touch logic — CI runs exactly
-   these), commit once (e.g. `fix(scope): address CodeRabbit round 1`), push
-   once. Loop back to step 1 with the new HEAD — this consumed one of the two
-   rounds.
+5. **One batch, one push.** Apply all of the round's (a) fixes together,
+   check the build locally (`pnpm lint`, and `pnpm test` if the changes touch
+   logic — CI runs exactly these), and commit once (e.g. `fix(scope): address
+   CodeRabbit round 1`). If the batch is substantial (new logic, changed
+   transaction/authz boundaries — not mechanical one-liners), review the
+   *fixes* before CodeRabbit sees them — unreviewed fix commits are where the
+   next round's "major" findings come from. In a kit repo that is
+   `/review <SHA from item 1> --lenses <relevant lenses>`, adjudicated per the kit,
+   so its verdict names the fix commit; first check
+   `git merge-base --is-ancestor <SHA from item 1> HEAD` — if it fails, an
+   amend rewrote the pushed commit: redo the fix as a new commit on top of it.
+   Not `--uncommitted`:
+   it stamps the verdict with the commit CodeRabbit already reviewed, and the
+   postmortem would score it as a local catch. If that `/review` fails, Step
+   1b item 2's fallback applies and the summary says so. Elsewhere, a scoped
+   subagent review over the batch. If that review added fixes, re-run the
+   checks and commit them. Then push once. Loop back to step 1 with the new HEAD — this
+   consumed one of the two rounds.
 6. **After round two**, do not push further fix commits. Disposition whatever
    remains via (b)/(c), and if anything is left that genuinely needs code
    changes, stop and bring it to the user with your read on it — a finding
@@ -101,7 +151,7 @@ fi
 ```
 Only on `run`, invoke `/review-postmortem <PR> --record-only`. Always pass `--record-only`; without it the command waits for approval. Its first line is `review-postmortem: scored | no-local-verdict | skipped | failed — …`, and after scored or no-local-verdict a `review-postmortem: record — …` line follows. If it prints no such first line, your line is `review-postmortem: failed — no status line`.
 
-**Every outcome continues to Step 5**, `failed` included. Copy the first line, and the record line when there is one, verbatim into the Step 5 summary. Never drop a `failed` line or call it clean.
+**Every outcome continues to Step 5**, `failed` included. Copy the first line, and the record line when there is one, verbatim into the Step 5 summary. Never drop a `failed` line or call it clean. After a Step 1b `subagent` line expect `skipped`; after `fallback`, `no-local-verdict` or a score against an older verdict. The Step 1b line is the cause.
 
 Then, whatever the postmortem printed, check whether `/review-tune` is due. **Due** = at least 5 `postmortem-pr*.md` records in the clone's `review-history/` modified after the last commit on any branch touching `.review/learnings.md` (never committed: count them all). Flag it; never run tune yourself.
 ```bash
@@ -120,7 +170,7 @@ That line goes in the Step 5 summary too.
 
 ## Step 5 — Confirm, then merge
 
-Present a short summary: PR link, what CodeRabbit findings you fixed, what you logged as issues (with links), what you rejected and why, CI status, `ACTIONABLE: 0`, and the Step 4b lines verbatim.
+Present a short summary: PR link, the Step 1b `pre-pr-review:` line, what CodeRabbit findings you fixed, what you logged as issues (with links), what you rejected and why, CI status, `ACTIONABLE: 0`, and the Step 4b lines verbatim.
 
 **If you are a managed worker**, send that summary to your PM session with `SendMessage` and wait for its `GO <PR> <sha>`. Don't push after reporting unless the PM sends work back; then fix it within your remaining rounds and report the new head. On GO, merge as a command of its own — `-R` keeps gh off your local branch, which you remove below, and `--match-head-commit` refuses a head that moved:
 ```bash
