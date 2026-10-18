@@ -49,7 +49,7 @@ In a kit repo:
    ```bash
    f="$(git rev-parse --show-toplevel)/.review/verdict.md"; h="$(git rev-parse HEAD)" || h=""
    if [ ! -e "$f" ]; then v="missing"
-   else v="$(awk -F ' — ' 'NR == 1 && NF == 4 && $1 == "# Review verdict" && $3 ~ /^[0-9a-f]+$/ && length($3) >= 4 { print $3 }' "$f")" || v="unreadable"; fi
+   else v="$(awk -F ' — ' -v title=1 -v rev=3 'NR == 1 && NF == 4 && $title == "# Review verdict" && $rev ~ /^[0-9a-f]+$/ && length($rev) >= 4 { print $rev }' "$f")" || v="unreadable"; fi
    case "$h" in
      "${v:-none}"*) echo "pre-pr-review: /review — verdict $v covers HEAD" ;;
      *) echo "pre-pr-review: stale — verdict ${v:-has no review header} does not cover ${h:-HEAD (git rev-parse failed)}" ;;
