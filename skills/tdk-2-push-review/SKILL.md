@@ -30,9 +30,9 @@ else bad=""; miss=""
     if [ -e "$top/$d" ] && [ ! -x "$top/$d" ]; then bad="$d"; fi
   done
   for f in .claude/commands/review.md scripts/review.sh .review/adjudication.md; do
-    [ -e "$top/$f" ] || miss="$miss $f"
+    if [ ! -e "$top/$f" ]; then miss="$miss $f"; elif [ ! -r "$top/$f" ]; then bad="$f"; fi
   done
-  if [ -n "$bad" ]; then echo "pre-pr-review: fallback — kit detection failed: cannot search $top/$bad"
+  if [ -n "$bad" ]; then echo "pre-pr-review: fallback — kit detection failed: cannot read $top/$bad"
   elif [ -z "$miss" ]; then echo "kit"
   elif [ "$miss" = " .claude/commands/review.md scripts/review.sh .review/adjudication.md" ]; then echo "pre-pr-review: subagent — no review kit in this repo"
   else echo "pre-pr-review: fallback — partial review kit, missing:$miss"; fi
@@ -43,7 +43,7 @@ On `kit`, the pre-PR review **is** the kit's `/review`; it replaces the subagent
 In a kit repo:
 
 1. `git fetch origin`, then `/review origin/main` — the PR's base (Step 2). Adjudicate exactly as `.review/adjudication.md` says — verify, classify, commit the fixes, its one scoped re-review if they are substantial, and `.review/verdict.md` last. ESCALATEs go to the user (a managed worker: its PM) before the push. Exit 2 means findings at `--fail-on`: adjudicate them like any others.
-2. **A run you can't trust is not a pass.** If `review.sh` exits 1 (codex missing, auth, quota, script error), or `.review/findings.json` is missing or unreadable, the run failed. Fix the cause if you can without the user (`codex login` is interactive, so not that). Otherwise this replaces adjudication step 1's "stop": say so, run the subagent review instead, skip item 3, and push on the line `pre-pr-review: fallback — /review failed: <why>`. A failed run's `findings.json` can still carry a `gitleaks` finding or `secrets_scan: leaks`: act on it before any push, fallback or not.
+2. **A run you can't trust is not a pass.** If `review.sh` exits anything but 0 or 2 (codex missing, auth, quota, script error), or `.review/findings.json` is missing or unreadable, the run failed. Fix the cause if you can without the user (`codex login` is interactive, so not that). Otherwise this replaces adjudication step 1's "stop": say so, run the subagent review instead, skip item 3, and push on the line `pre-pr-review: fallback — /review failed: <why>`. A failed run's `findings.json` can still carry a `gitleaks` finding or `secrets_scan: leaks`: act on it before any push, fallback or not.
    `changed_files: 0` reviewed nothing: fix the base and re-run, and write no verdict. `complete: false` with `unreadable_paths`: make them readable and re-run; never keep that verdict. Otherwise (failed lenses, a failed secret scan) fix the cause and re-run once; if it is still incomplete, keep the verdict, and once item 3 prints `covers`, report it as `pre-pr-review: /review incomplete — verdict <sha> covers HEAD; <unfinished lenses: … | secrets scan: failed>`. Add `secrets: not_scanned` to whichever line you report when it applies.
 3. Check that the verdict names the HEAD you are about to push:
    ```bash
@@ -118,7 +118,8 @@ fresh review surface, so round N's hasty fixes become round N+1's findings.
    it stamps the verdict with the commit CodeRabbit already reviewed, and the
    postmortem would score it as a local catch. If that `/review` fails, Step
    1b item 2's fallback applies and the summary says so. Elsewhere, a scoped
-   subagent review over the batch. Then push once. Loop back to step 1 with the new HEAD — this
+   subagent review over the batch. If that review added fixes, re-run the
+   checks and commit them. Then push once. Loop back to step 1 with the new HEAD — this
    consumed one of the two rounds.
 6. **After round two**, do not push further fix commits. Disposition whatever
    remains via (b)/(c), and if anything is left that genuinely needs code
