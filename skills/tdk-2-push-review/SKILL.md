@@ -72,11 +72,15 @@ The first head CodeRabbit reviews is the one Step 4b's postmortem scores, so its
 
 ### Skipping CodeRabbit
 
-This is the skip rule; other skills and the global CLAUDE.md point here.
+This is the skip rule; other skills point here.
 
 A PR may open with `@coderabbitai ignore` in its description only when it changes no behaviour: docs that only people read (README, docs/, CHANGELOG), version bumps and release PRs, and review-kit sync PRs in spokes. Never code, scripts, CI, config, skills, prompts or lens text, CLAUDE.md/AGENTS.md, or anything touching auth, secrets or infra. Judge a file by what it does, not its extension: a .md an agent or script loads is code. The line must be in the body at `gh pr create`; added later, the opening review has already run. Deleting the line opts back in from the next commit. This rule holds until codex-review-kit issue #76 reaches stage 2 (sampling).
 
+A review-kit sync PR qualifies only when every file it changes is one the kit sync writes; for those files the "never" list gives way.
+
 A skipped PR still runs Step 3's `wait` once, which confirms the skip (exit 6), and the Step 5 summary says it skipped and why it qualifies. A PM checks the diff against this rule before GO.
+
+This rule covers only a bare `Review skipped` status, the `@coderabbitai ignore` case. `Review skipped: <reason>` comes from the repo's own CodeRabbit config (a label opt-in, `auto_incremental_review: false`). There the repo's AGENTS.md/CLAUDE.md says which PRs, and which pushes, need a CodeRabbit review.
 
 ## Step 3 — The CodeRabbit rounds (two, maximum)
 
@@ -91,6 +95,7 @@ fresh review surface, so round N's hasty fixes become round N+1's findings.
    ```bash
    python3 ~/.claude/skills/tdk-2-push-review/scripts/coderabbit.py wait --pr <PR> --sha <SHA>
    ```
+   After any `@coderabbitai review` nudge on an unchanged head, record `since="$(date -u +%FT%TZ)"` just before posting it and add `--since "$since"`. Without it, `wait` reads the status from before the nudge and exits on it at once.
    CodeRabbit usually takes a few minutes. The script polls the `CodeRabbit` commit status on the head (self-times-out at 20 min). Once CodeRabbit finishes with the head, it prints `ACTIONABLE: N — head <sha> <STATE> (…)`, then each unresolved, **non-nitpick** finding — its location, severity tag (🔴 Critical / 🟠 Major / 🟡 Minor / 🔵 Trivial), URL, and body. The body often includes a "Prompt for AI Agents" block with CodeRabbit's own fix guidance — read it.
    - Because CodeRabbit can be slow, prefer running this **in the background** and picking up the output when it finishes.
    - Act on the **exit code**; `ACTIONABLE: 0` alone is not a pass:
@@ -99,13 +104,14 @@ fresh review surface, so round N's hasty fixes become round N+1's findings.
      |------|------------|----|
      | 0 | reviewed, findings remain | item 4 |
      | 5 | reviewed, clean | item 3 |
-     | 6 | **skipped** (`@coderabbitai ignore` or the repo's label config) | Not reviewed. **Don't nudge** with `@coderabbitai review`: that spends the review the skip saved. If the PR qualifies under the skip rule (Step 2), go to Step 4 and say so in the Step 5 summary. If it does not qualify, the skip was a mistake: delete the `@coderabbitai ignore` line from the body and post `@coderabbitai review` once. |
-     | 7 | **rate limited** | Not reviewed. Wait the minutes the output names (`@coderabbitai rate limit` checks the quota without spending a review; use it when no wait is named). Then post `@coderabbitai review` **once** and run `wait` again. Rate limited a second time: report it (a managed worker: to its PM) rather than nudging again. |
-     | 4 | timed out, still pending | Read `gh api repos/<owner>/<repo>/commits/<SHA>/statuses`. `Review in progress`: CodeRabbit is still working; run `wait` again, don't nudge. No `CodeRabbit` status at all on the head: it never started; nudge once with `gh pr comment <PR> --body "@coderabbitai review"` only if the repo uses CodeRabbit (earlier PRs carry its reviews). |
+     | 6 | **skipped** | Not reviewed. **Don't nudge** with `@coderabbitai review`: that spends the review the skip saved. Bare `Review skipped` (`@coderabbitai ignore`): if the PR qualifies under the skip rule (Step 2), go to Step 4 and say so in the Step 5 summary. If it does not qualify, the skip was a mistake: delete the `@coderabbitai ignore` line from the body and post `@coderabbitai review` once. `Review skipped: <reason>` (repo config): follow the repo's AGENTS.md/CLAUDE.md on whether this PR or push needs a review; nudge once only if it says so. |
+     | 7 | **rate limited** | Not reviewed. Wait the time the output names; it already subtracts the time since CodeRabbit wrote it. When none is named, `@coderabbitai rate limit` checks the quota without spending a review. Then post `@coderabbitai review` **once** and run `wait --since` again. Rate limited a second time: report it (a managed worker: to its PM) rather than nudging again. |
+     | 8 | **unknown** status | Not reviewed. Report the description it printed (a managed worker: to its PM); don't nudge. |
+     | 4 | timed out, still pending | Read `gh api repos/<owner>/<repo>/commits/<SHA>/statuses`. `Review in progress`: CodeRabbit is still working; run `wait` again, don't nudge. No `CodeRabbit` status at all on the head: if earlier PR heads carry `CodeRabbit` statuses, it never started; nudge once and `wait --since`. If they don't, the repo has CodeRabbit's commit status off, so a clean pass leaves no trace: report it rather than nudging. |
      | 2 | a `gh` call failed | Fix the cause (auth, network) and re-run. |
 
 3. **If exit 5 (`ACTIONABLE: 0`, head `REVIEWED`) → done.** Go to Step 4.
-4. **Otherwise, triage every finding in the round before fixing anything.**
+4. **If exit 0, triage every finding in the round before fixing anything.**
    Severity tags are CodeRabbit's opinion, not ground truth — read the actual
    code first, then route each finding to exactly one disposition:
    - **(a) Real, and introduced by this PR** → fix it properly, in this
@@ -189,7 +195,7 @@ That line goes in the Step 5 summary too.
 
 ## Step 5 — Confirm, then merge
 
-Present a short summary: PR link, the Step 1b `pre-pr-review:` line, what CodeRabbit findings you fixed, what you logged as issues (with links), what you rejected and why, CI status, the final `ACTIONABLE: …` line verbatim (it carries the head's state), and the Step 4b lines verbatim. A skipped PR also names which part of the skip rule it falls under.
+Present a short summary: PR link, the Step 1b `pre-pr-review:` line, what CodeRabbit findings you fixed, what you logged as issues (with links), what you rejected and why, CI status, the `ACTIONABLE: …` line verbatim from a fresh `coderabbit.py threads --pr <PR>` run just before the summary (it carries the head's state, and counts threads you resolved since the last `wait`), and the Step 4b lines verbatim. A skipped PR also names which part of the skip rule it falls under.
 
 **If you are a managed worker**, send that summary to your PM session with `SendMessage` and wait for its `GO <PR> <sha>`. Don't push after reporting unless the PM sends work back; then fix it within your remaining rounds and report the new head. On GO, merge as a command of its own — `-R` keeps gh off your local branch, which you remove below, and `--match-head-commit` refuses a head that moved:
 ```bash
@@ -215,4 +221,4 @@ gh pr merge <PR> --squash --delete-branch
 | Check the review quota (spends nothing) | `gh pr comment <PR> --body "@coderabbitai rate limit"` |
 | Check CI | `gh pr checks <PR>` |
 
-The script keys on **unresolved review threads**, so it correctly tracks findings across every push (a finding raised three rounds ago that was never addressed still shows up). It prints `ACTIONABLE: N — head <sha> <STATE> (…)` as the top line. The exit code is your loop condition: 0 and 5 only when the head was reviewed, 6 skipped, 7 rate limited, and `threads` exits 3 while the head is still pending. `--repo owner/name` overrides the auto-detected repo; `--sha` defaults to the PR's head.
+The script keys on **unresolved review threads**, so it correctly tracks findings across every push (a finding raised three rounds ago that was never addressed still shows up). It prints `ACTIONABLE: N — head <sha> <STATE> (…)` as the top line. The exit code is your loop condition: 0 and 5 only when the head was reviewed, 6 skipped, 7 rate limited, 8 an unknown status, and `threads` exits 3 while the head is still pending. `--repo owner/name` overrides the auto-detected repo; `--sha` defaults to the PR's head.

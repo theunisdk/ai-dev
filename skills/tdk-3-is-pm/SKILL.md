@@ -144,20 +144,24 @@ Send GO only when **all** of these hold:
 - CodeRabbit covered the head. Read the newest `CodeRabbit` status **description** on the head
   SHA, not its state: completed, skipped and rate-limited runs all post `success`.
   - `Review completed` — passes.
-  - `Review skipped…` — passes only if the PR's diff qualifies under the skip rule in
-    `tdk-2-push-review` (Step 2, "Skipping CodeRabbit"). Check the diff yourself
+  - `Review skipped` (bare: `@coderabbitai ignore`) — passes only if the PR's diff qualifies under
+    the skip rule in `tdk-2-push-review` (Step 2, "Skipping CodeRabbit"). Check the diff yourself
     (`gh pr diff <n> -R <owner/repo> --name-only`, then each file against the rule), not the
     worker's word for it.
-  - `Review rate limited`, `Review in progress`, or no `CodeRabbit` status — never a pass. CodeRabbit
-    has not reviewed this head.
+  - `Review skipped: <reason>` (the repo's CodeRabbit config) — passes only if the repo's
+    AGENTS.md/CLAUDE.md says this PR, or this push, needs no CodeRabbit review. Check it yourself.
+  - No `CodeRabbit` status, but a non-empty CodeRabbit review object on the head — passes only in a
+    repo whose earlier PRs carry no `CodeRabbit` statuses either (commit status turned off).
+  - `Review rate limited`, `Review in progress`, any other description, or no `CodeRabbit` status
+    otherwise — never a pass. CodeRabbit has not reviewed this head.
 - every review's `commit_id` matches the head SHA — a verdict on an older commit says nothing about
   what you are about to merge. With no reviews this holds trivially, so it never stands in for the
   status check above.
 - CI passed on its own terms: read the job result, not the check's conclusion. A job that is green
   because every step was skipped is not a pass.
 - the worker reported `ACTIONABLE: 0` with head state `REVIEWED`, or `SKIPPED` on a PR that passed
-  the skip check above, along with its dispositions. `ACTIONABLE: 0` with `RATE LIMITED` is not a
-  pass.
+  the skip check above, along with its dispositions. `ACTIONABLE: 0` with `RATE LIMITED` or
+  `UNKNOWN` is not a pass.
 - the report carries the `pre-pr-review:` line, the `review-postmortem:` first line, the `record`
   line after `scored` or `no-local-verdict`, and the `review-tune:` line. Any outcome passes,
   `failed` included: the postmortem is measurement. A missing line holds GO; ask for it.

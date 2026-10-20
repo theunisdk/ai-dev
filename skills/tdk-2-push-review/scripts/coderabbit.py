@@ -16,23 +16,29 @@ The head's review state comes from the `CodeRabbit` commit status on the head
 SHA (newest entry), not only from review objects: a clean incremental pass
 leaves no review object, and skipped, rate-limited and completed runs all post
 state=success. Only the description tells them apart:
-  reviewed      "Review completed", or a non-empty CodeRabbit review object on
-                the head (an empty-body one acknowledges a thread reply)
-  skipped       "Review skipped…" (`@coderabbitai ignore`, label config, …)
+  reviewed      "Review completed"; with no CodeRabbit status on the head
+                (repos with review_status off), a non-empty CodeRabbit review
+                object on it (an empty-body one acknowledges a thread reply)
+  skipped       "Review skipped" (`@coderabbitai ignore`), or "Review skipped:
+                <reason>" (the repo's CodeRabbit config, e.g. label opt-in)
   rate limited  "Review rate limited" — not reviewed
-  pending       "Review in progress", or no CodeRabbit status yet
+  pending       "Review in progress" / "Review approved", or no status yet
+  unknown       any other description — not reviewed
 
 Subcommands:
   threads  --pr N [--sha S]  list unresolved non-nitpick CodeRabbit findings and
                              the head's review state (S defaults to the PR head).
-  wait     --pr N [--sha S]  poll until the head leaves pending, then do as threads.
+  wait     --pr N [--sha S] [--since T]
+                             poll until the head leaves pending, then do as threads.
+                             After a nudge, pass T = the nudge time (UTC ISO 8601,
+                             `date -u +%FT%TZ`): older statuses then count as pending.
 
 Exit codes (both subcommands):
   0  head reviewed, findings remain     5  head reviewed, clean (ACTIONABLE: 0)
   6  head skipped — not reviewed        7  head rate limited — not reviewed
+  8  unknown status — not reviewed      2  a gh/git call failed
   3  threads only: head still pending   4  wait only: timed out while pending
-  2  a gh/git call failed
-Exit 5 is the only clean pass. 6 and 7 still list older unresolved findings.
+Exit 5 is the only clean pass. 6, 7 and 8 still list older unresolved findings.
 
 Repo defaults to `gh`'s current repo; override with --repo owner/name.
 Note: REST review author is "coderabbitai[bot]", GraphQL author is "coderabbitai".
@@ -43,6 +49,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 
 NITPICK = "🧹 Nitpick"
 REST_BOT = "coderabbitai[bot]"
@@ -50,8 +57,11 @@ GQL_BOT = "coderabbitai"
 STATUS_CONTEXT = "CodeRabbit"
 RATE_LIMIT_MARKER = "rate limited by coderabbit.ai"
 NEXT_REVIEW = re.compile(r"Next included review available in ([^.*\n]+)")
+MINUTES = re.compile(r"^(\d+) minutes?$")
 
-REVIEWED, SKIPPED, RATE_LIMITED, PENDING = "reviewed", "skipped", "rate limited", "pending"
+REVIEWED, SKIPPED, RATE_LIMITED, PENDING, UNKNOWN = (
+    "reviewed", "skipped", "rate limited", "pending", "unknown")
+EXIT = {SKIPPED: 6, RATE_LIMITED: 7, UNKNOWN: 8, PENDING: 3}
 
 THREADS_QUERY = """
 query($owner:String!,$repo:String!,$pr:Int!){
@@ -134,35 +144,53 @@ def unresolved_findings(pr, repo):
     return findings
 
 
-def head_state(pr, repo, sha):
+def head_state(pr, repo, sha, since=None):
     """(state, detail) of CodeRabbit's run on commit SHA; see the module docstring."""
     statuses = [st for st in api_list(f"repos/{repo}/commits/{sha}/statuses?per_page=100")
-                if st.get("context") == STATUS_CONTEXT]
+                if st.get("context") == STATUS_CONTEXT
+                and (not since or (st.get("created_at") or "") >= since)]
     newest = max(statuses, key=lambda st: st.get("created_at") or "", default=None)
-    desc = (newest or {}).get("description") or ""
+    if newest is None:
+        reviews = api_list(f"repos/{repo}/pulls/{pr}/reviews")
+        if any(r.get("commit_id") == sha and (r.get("user") or {}).get("login") == REST_BOT
+               and (r.get("body") or "").strip()
+               and (not since or (r.get("submitted_at") or "") >= since) for r in reviews):
+            return REVIEWED, "review object on head, no CodeRabbit status"
+        return PENDING, "no CodeRabbit status on head" + (f" since {since}" if since else "")
+    desc = newest.get("description") or ""
+    detail = f'status "{desc}"'
     if desc.startswith("Review completed"):
-        return REVIEWED, f'status "{desc}"'
+        return REVIEWED, detail
     if desc.startswith("Review skipped"):
-        return SKIPPED, f'status "{desc}"'
+        return SKIPPED, detail
     if desc.startswith("Review rate limited"):
-        return RATE_LIMITED, f'status "{desc}"'
-    reviews = api_list(f"repos/{repo}/pulls/{pr}/reviews")
-    if any(r.get("commit_id") == sha and (r.get("user") or {}).get("login") == REST_BOT
-           and (r.get("body") or "").strip() for r in reviews):
-        return REVIEWED, "review object on head"
-    return PENDING, f'status "{desc}"' if newest else "no CodeRabbit status on head"
+        return RATE_LIMITED, detail
+    if desc.startswith(("Review in progress", "Review approved")):
+        return PENDING, detail
+    return UNKNOWN, f'status {newest.get("state")} "{desc}"'
 
 
 def next_review_wait(pr, repo):
-    """CodeRabbit's "Next included review available in N minutes", or None."""
+    """Time left until CodeRabbit's "Next included review available in N minutes", or None."""
     for c in reversed(api_list(f"repos/{repo}/issues/{pr}/comments")):
         if (c.get("user") or {}).get("login") != REST_BOT:
             continue
         body = c.get("body") or ""
-        if RATE_LIMIT_MARKER in body:
-            m = NEXT_REVIEW.search(body)
-            if m:
-                return f"{m.group(1).strip()} (comment updated {c.get('updated_at')})"
+        if RATE_LIMIT_MARKER not in body:
+            continue
+        m = NEXT_REVIEW.search(body)
+        if not m:
+            continue
+        named, updated = m.group(1).strip(), c.get("updated_at") or ""
+        mins = MINUTES.match(named)
+        if not mins or not updated:
+            return f"{named} as of {updated or 'an unknown time'}"
+        elapsed = (datetime.now(timezone.utc)
+                   - datetime.fromisoformat(updated.replace("Z", "+00:00"))).total_seconds() / 60
+        left = int(mins.group(1)) - int(elapsed)
+        if left <= 0:
+            return f"0 minutes: quota should be free now ({named} as of {updated})"
+        return f"~{left} minutes ({named} as of {updated})"
     return None
 
 
@@ -178,7 +206,7 @@ def report(pr, repo, sha, state, detail):
     n = print_findings(pr, repo, head)
     if state == REVIEWED:
         return 0 if n > 0 else 5
-    return {SKIPPED: 6, RATE_LIMITED: 7, PENDING: 3}[state]
+    return EXIT[state]
 
 
 def print_findings(pr, repo, head):
@@ -200,6 +228,7 @@ def main():
     p.add_argument("cmd", choices=["threads", "wait"])
     p.add_argument("--pr", required=True, type=int)
     p.add_argument("--sha")
+    p.add_argument("--since")
     p.add_argument("--repo")
     p.add_argument("--timeout", type=int, default=1200)
     p.add_argument("--interval", type=int, default=45)
@@ -214,7 +243,7 @@ def main():
     if a.cmd == "wait":
         deadline = time.time() + a.timeout
         while True:
-            state, detail = head_state(a.pr, repo, sha)
+            state, detail = head_state(a.pr, repo, sha, a.since)
             if state != PENDING:
                 sys.exit(report(a.pr, repo, sha, state, detail))
             if time.time() >= deadline:
@@ -224,6 +253,7 @@ def main():
               f"It may still be reviewing; check the commit status before nudging.",
               file=sys.stderr)
         sys.exit(4)
+
 
 if __name__ == "__main__":
     main()
