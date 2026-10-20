@@ -12,13 +12,19 @@ CodeRabbit tags each finding with a severity line, e.g.
 Severities: 🔴 Critical, 🟠 Major, 🟡 Minor, 🔵 Trivial. Nitpicks carry a
 "🧹 Nitpick" tag and are skipped.
 
+Findings CodeRabbit cannot post inline ("Outside diff range comments (N)",
+"Duplicate comments (N)") live only in the body of its newest review on the
+head. They have no thread to resolve and count until a later review on a new
+head stops repeating them.
+
 The head's review state comes from the `CodeRabbit` commit status on the head
 SHA (newest entry), not only from review objects: a clean incremental pass
 leaves no review object, and skipped, rate-limited and completed runs all post
 state=success. Only the description tells them apart:
-  reviewed      "Review completed"; with no CodeRabbit status on the head
-                (repos with review_status off), a non-empty CodeRabbit review
-                object on it (an empty-body one acknowledges a thread reply)
+  reviewed      "Review completed"; with no CodeRabbit status on the head, a
+                non-empty CodeRabbit review object on it, but only in a repo
+                where CodeRabbit posts no statuses at all (review_status off).
+                An empty-body review object acknowledges a thread reply.
   skipped       "Review skipped" (`@coderabbitai ignore`), or "Review skipped:
                 <reason>" (the repo's CodeRabbit config, e.g. label opt-in)
   rate limited  "Review rate limited" — not reviewed
@@ -62,6 +68,11 @@ MINUTES = re.compile(r"^(\d+) minutes?$")
 REVIEWED, SKIPPED, RATE_LIMITED, PENDING, UNKNOWN = (
     "reviewed", "skipped", "rate limited", "pending", "unknown")
 EXIT = {SKIPPED: 6, RATE_LIMITED: 7, UNKNOWN: 8, PENDING: 3}
+
+BODY_SECTION = re.compile(r"([A-Z][A-Za-z ]*?) comments \((\d+)\)|Prompt to fix review comments")
+BODY_KINDS = ("Outside diff range", "Duplicate")
+BODY_ITEM = re.compile(r"<summary>(.*?)</summary><blockquote>(.*?)</blockquote></details>", re.S)
+BODY_LOC = re.compile(r"`([^`\s]+:\d[\d-]*)`")
 
 THREADS_QUERY = """
 query($owner:String!,$repo:String!,$pr:Int!){
@@ -155,6 +166,25 @@ def nudge_time(pr, repo):
     return max(times)
 
 
+def head_review(reviews, sha, since=None):
+    """Newest non-empty CodeRabbit review object on commit SHA, or None."""
+    on_head = [r for r in reviews
+               if r.get("commit_id") == sha and (r.get("user") or {}).get("login") == REST_BOT
+               and (r.get("body") or "").strip()
+               and (not since or (r.get("submitted_at") or "") >= since)]
+    return max(on_head, key=lambda r: r.get("submitted_at") or "", default=None)
+
+
+def repo_posts_status(pr, repo):
+    """True if CodeRabbit has posted a commit status on this PR or a recent one."""
+    shas = [c["sha"] for c in api_list(f"repos/{repo}/pulls/{pr}/commits")]
+    recent = json.loads(run(["gh", "api", f"repos/{repo}/pulls?state=all&per_page=10"]))
+    shas += [p["head"]["sha"] for p in recent if p.get("number") != pr]
+    return any(st.get("context") == STATUS_CONTEXT
+               for sha in shas
+               for st in json.loads(run(["gh", "api", f"repos/{repo}/commits/{sha}/statuses"])))
+
+
 def head_state(pr, repo, sha, since=None):
     """(state, detail) of CodeRabbit's run on commit SHA; see the module docstring."""
     statuses = [st for st in api_list(f"repos/{repo}/commits/{sha}/statuses?per_page=100")
@@ -162,12 +192,12 @@ def head_state(pr, repo, sha, since=None):
                 and (not since or (st.get("created_at") or "") >= since)]
     newest = max(statuses, key=lambda st: st.get("created_at") or "", default=None)
     if newest is None:
-        reviews = api_list(f"repos/{repo}/pulls/{pr}/reviews")
-        if any(r.get("commit_id") == sha and (r.get("user") or {}).get("login") == REST_BOT
-               and (r.get("body") or "").strip()
-               and (not since or (r.get("submitted_at") or "") >= since) for r in reviews):
-            return REVIEWED, "review object on head, no CodeRabbit status"
-        return PENDING, "no CodeRabbit status on head" + (f" since {since}" if since else "")
+        missing = "no CodeRabbit status on head" + (f" since {since}" if since else "")
+        if head_review(api_list(f"repos/{repo}/pulls/{pr}/reviews"), sha, since):
+            if not repo_posts_status(pr, repo):
+                return REVIEWED, "review object on head; this repo gets no CodeRabbit statuses"
+            missing += ", though a review object is on it"
+        return PENDING, missing
     desc = newest.get("description") or ""
     detail = f'status "{desc}"'
     if desc.startswith("Review completed"):
@@ -208,6 +238,32 @@ def next_review_wait(pr, repo):
     return None
 
 
+def body_findings(review):
+    """Non-nitpick findings in a review body's outside-diff and duplicate sections."""
+    if not review:
+        return []
+    text = re.sub(r"^> ?", "", review.get("body") or "", flags=re.M)
+    marks = list(BODY_SECTION.finditer(text))
+    findings = []
+    for i, m in enumerate(marks):
+        if not m.group(1) or not m.group(1).startswith(BODY_KINDS):
+            continue
+        section = text[m.end():marks[i + 1].start() if i + 1 < len(marks) else len(text)]
+        items = [(summ, body) for summ, body in BODY_ITEM.findall(section) if NITPICK not in body]
+        for summ, body in items:
+            loc = BODY_LOC.search(body) or BODY_LOC.search(re.sub(r"</?code>", "`", summ))
+            findings.append({"path": loc.group(1) if loc else m.group(1), "line": None,
+                             "outdated": False, "url": review.get("html_url"),
+                             "tag": f"{m.group(1).lower()}, in the review body: no thread",
+                             "body": body.strip()})
+        unparsed = int(m.group(2)) - len(items) - section.count(NITPICK)
+        for _ in range(max(unparsed, 0)):
+            findings.append({"path": f"{m.group(1)} comments", "line": None, "outdated": False,
+                             "url": review.get("html_url"), "tag": "not parsed: read the review body",
+                             "body": ""})
+    return findings
+
+
 def report(pr, repo, sha, state, detail):
     """Print the head's state and findings; return the exit code."""
     head = f"head {sha[:7]} {state.upper()} ({detail})"
@@ -217,18 +273,20 @@ def report(pr, repo, sha, state, detail):
         wait = next_review_wait(pr, repo)
         head += (f"; next included review available in {wait}" if wait else
                  "; no wait time in CodeRabbit's summary comment, '@coderabbitai rate limit' shows it")
-    n = print_findings(pr, repo, head)
+    review = head_review(api_list(f"repos/{repo}/pulls/{pr}/reviews"), sha)
+    n = print_findings(pr, repo, head, body_findings(review))
     if state == REVIEWED:
         return 0 if n > 0 else 5
     return EXIT[state]
 
 
-def print_findings(pr, repo, head):
-    findings = unresolved_findings(pr, repo)
+def print_findings(pr, repo, head, extra):
+    findings = unresolved_findings(pr, repo) + extra
     print(f"ACTIONABLE: {len(findings)} — {head}\n")
     for i, f in enumerate(findings, 1):
         loc = f"{f['path']}:{f['line']}" if f["line"] else f["path"]
         tag = " [outdated]" if f["outdated"] else ""
+        tag += f" [{f['tag']}]" if f.get("tag") else ""
         print(f"[{i}] {loc}{tag}")
         print(f"    {f['url']}")
         for ln in f["body"].splitlines():

@@ -154,14 +154,15 @@ Send GO only when **all** of these hold:
     repo whose earlier PRs carry no `CodeRabbit` statuses either (commit status turned off).
   - `Review rate limited`, `Review in progress`, any other description, or no `CodeRabbit` status
     otherwise — never a pass. CodeRabbit has not reviewed this head.
-- every review's `commit_id` matches the head SHA — a verdict on an older commit says nothing about
-  what you are about to merge. With no reviews this holds trivially, so it never stands in for the
-  status check above.
+- any review object you rely on as evidence is on the head SHA. A verdict on an older commit says
+  nothing about what you are about to merge. Older review objects are history and fail nothing: a
+  clean incremental pass on the head leaves `Review completed` and no new review object.
 - CI passed on its own terms: read the job result, not the check's conclusion. A job that is green
   because every step was skipped is not a pass.
 - the worker reported `ACTIONABLE: 0` with head state `REVIEWED`, or `SKIPPED` on a PR that passed
   the skip check above, along with its dispositions. `ACTIONABLE: 0` with `RATE LIMITED` or
-  `UNKNOWN` is not a pass.
+  `UNKNOWN` is not a pass. A count above 0 passes only when every remaining item is tagged
+  `in the review body: no thread` and the worker answered each one, as (b) or (c), in a PR comment.
 - the report carries the `pre-pr-review:` line, the `review-postmortem:` first line, the `record`
   line after `scored` or `no-local-verdict`, and the `review-tune:` line. Any outcome passes,
   `failed` included: the postmortem is measurement. A missing line holds GO; ask for it.

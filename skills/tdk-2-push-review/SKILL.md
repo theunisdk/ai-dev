@@ -130,6 +130,11 @@ fresh review surface, so round N's hasty fixes become round N+1's findings.
      the justification lives in the PR reply (see CLAUDE.md).
    - **Nitpicks (🧹) and trivial style points are out of scope** — the script
      already filters them out. Don't chase them.
+   - **Findings tagged `in the review body: no thread`** (outside the diff
+     range, or duplicates) have no thread to reply to or resolve. They count
+     until CodeRabbit's review of a later head stops repeating them. Answer a
+     (b) or (c) one in a single PR comment that quotes each finding with its
+     disposition, and list them in the Step 5 summary.
 5. **One batch, one push.** Apply all of the round's (a) fixes together,
    check the build locally (`pnpm lint`, and `pnpm test` if the changes touch
    logic — CI runs exactly these), and commit once (e.g. `fix(scope): address
