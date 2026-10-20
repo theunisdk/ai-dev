@@ -134,24 +134,38 @@ Autonomous, but **never on a status line.** Before every GO:
 gh pr view <n> -R <owner/repo> --json reviewDecision,mergeStateStatus,headRefOid,statusCheckRollup
 gh api repos/<owner>/<repo>/pulls/<n>/reviews \
   -q '.[]|"\(.submitted_at) \(.user.login) state=\(.state) sha=\(.commit_id[0:8])"'
+gh api repos/<owner>/<repo>/commits/<headRefOid>/statuses \
+  -q '[.[]|select(.context=="CodeRabbit")]|max_by(.created_at)|"\(.state) \(.description)"'
 ```
 
 Send GO only when **all** of these hold:
 
 - `reviewDecision` is not `CHANGES_REQUESTED`
+- CodeRabbit covered the head. Read the newest `CodeRabbit` status **description** on the head
+  SHA, not its state: completed, skipped and rate-limited runs all post `success`.
+  - `Review completed` — passes.
+  - `Review skipped…` — passes only if the PR's diff qualifies under the skip rule in
+    `tdk-2-push-review` (Step 2, "Skipping CodeRabbit"). Check the diff yourself
+    (`gh pr diff <n> -R <owner/repo> --name-only`, then each file against the rule), not the
+    worker's word for it.
+  - `Review rate limited`, `Review in progress`, or no `CodeRabbit` status — never a pass. CodeRabbit
+    has not reviewed this head.
 - every review's `commit_id` matches the head SHA — a verdict on an older commit says nothing about
-  what you are about to merge
+  what you are about to merge. With no reviews this holds trivially, so it never stands in for the
+  status check above.
 - CI passed on its own terms: read the job result, not the check's conclusion. A job that is green
   because every step was skipped is not a pass.
-- the worker reported `ACTIONABLE: 0` along with its dispositions
+- the worker reported `ACTIONABLE: 0` with head state `REVIEWED`, or `SKIPPED` on a PR that passed
+  the skip check above, along with its dispositions. `ACTIONABLE: 0` with `RATE LIMITED` is not a
+  pass.
 - the report carries the `pre-pr-review:` line, the `review-postmortem:` first line, the `record`
   line after `scored` or `no-local-verdict`, and the `review-tune:` line. Any outcome passes,
   `failed` included: the postmortem is measurement. A missing line holds GO; ask for it.
   `pre-pr-review: stale` holds GO; send it back to review the head. Carry any `pre-pr-review: fallback` or `incomplete`, `failed`, `NOT posted`,
   `NOT written`, `review-tune: unknown` or `review-tune: due` into the Step 7 digest.
 
-No review object at all is not a failure — CodeRabbit creates one only when it has findings. Confirm
-a clean pass with `gh api repos/<owner>/<repo>/commits/<sha>/status`.
+No review object at all is not a failure — CodeRabbit creates one only when it has findings. The
+status description above is what confirms a clean pass.
 
 If any gate fails, do not send GO and do not fix it yourself: send it back to the worker with what
 failed. If that worker has already spent its two `tdk-2` fix rounds, escalate.
