@@ -112,7 +112,7 @@ fresh review surface, so round N's hasty fixes become round N+1's findings.
      | 4 | timed out, still pending | Read `gh api repos/<owner>/<repo>/commits/<SHA>/statuses`. `Review in progress`: CodeRabbit is still working; run `wait` again, don't nudge. No `CodeRabbit` status at all on the head: if earlier PR heads carry `CodeRabbit` statuses, it never started; nudge once and `wait --after-nudge`. If they don't, the repo has CodeRabbit's commit status off, so a clean pass leaves no trace: report it rather than nudging. After `--after-nudge`, with only statuses older than the nudge: CodeRabbit ignored the nudge; report it and don't nudge again. |
      | 2 | a `gh` call failed | Fix the cause (auth, network) and re-run. |
 
-3. **If exit 5 (`ACTIONABLE: 0`, head `REVIEWED`) → done.** Go to Step 4.
+3. **If exit 5 (`ACTIONABLE: 0`, head `REVIEWED`) → done.** Go to Step 4. Also done, with no push and no nudge: exit 0 where every remaining item is tagged `in the review body: no thread` and you answered each one as (b) or (c) in a PR comment (item 4).
 4. **If exit 0 (or exit 6 with findings, per its row), triage every finding in the round before fixing anything.**
    Severity tags are CodeRabbit's opinion, not ground truth — read the actual
    code first, then route each finding to exactly one disposition:
@@ -134,7 +134,10 @@ fresh review surface, so round N's hasty fixes become round N+1's findings.
      range, or duplicates) have no thread to reply to or resolve. They count
      until CodeRabbit's review of a later head stops repeating them. Answer a
      (b) or (c) one in a single PR comment that quotes each finding with its
-     disposition, and list them in the Step 5 summary.
+     disposition, and list them in the Step 5 summary. One tagged `not parsed`
+     means the script could not read it: read it in the review body and
+     answer it the same way. A duplicate may repeat a finding that still has
+     an open thread; disposition it once, on the thread.
 5. **One batch, one push.** Apply all of the round's (a) fixes together,
    check the build locally (`pnpm lint`, and `pnpm test` if the changes touch
    logic — CI runs exactly these), and commit once (e.g. `fix(scope): address

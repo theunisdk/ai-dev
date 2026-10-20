@@ -69,7 +69,8 @@ REVIEWED, SKIPPED, RATE_LIMITED, PENDING, UNKNOWN = (
     "reviewed", "skipped", "rate limited", "pending", "unknown")
 EXIT = {SKIPPED: 6, RATE_LIMITED: 7, UNKNOWN: 8, PENDING: 3}
 
-BODY_SECTION = re.compile(r"([A-Z][A-Za-z ]*?) comments \((\d+)\)|Prompt to fix review comments")
+BODY_SECTION = re.compile(r"^(?:\*\*|<summary>)\W*?(?:([A-Z][A-Za-z ]*?) comments(?: \((\d+)\)|: (\d+))"
+                          r"|Prompt to fix review comments)", re.M)
 BODY_KINDS = ("Outside diff range", "Duplicate")
 BODY_ITEM = re.compile(r"<summary>(.*?)</summary><blockquote>(.*?)</blockquote></details>", re.S)
 BODY_LOC = re.compile(r"`([^`\s]+:\d[\d-]*)`")
@@ -244,23 +245,29 @@ def body_findings(review):
         return []
     text = re.sub(r"^> ?", "", review.get("body") or "", flags=re.M)
     marks = list(BODY_SECTION.finditer(text))
-    findings = []
+    findings, kinds_seen = [], False
+
+    def add(path, kind, body):
+        findings.append({"path": path, "line": None, "outdated": False,
+                         "url": review.get("html_url"),
+                         "tag": f"{kind}, in the review body: no thread", "body": body})
+
     for i, m in enumerate(marks):
         if not m.group(1) or not m.group(1).startswith(BODY_KINDS):
             continue
+        kinds_seen = True
+        kind = m.group(1).lower()
         section = text[m.end():marks[i + 1].start() if i + 1 < len(marks) else len(text)]
-        items = [(summ, body) for summ, body in BODY_ITEM.findall(section) if NITPICK not in body]
+        items = BODY_ITEM.findall(section)
         for summ, body in items:
+            if NITPICK in summ or NITPICK in body:
+                continue
             loc = BODY_LOC.search(body) or BODY_LOC.search(re.sub(r"</?code>", "`", summ))
-            findings.append({"path": loc.group(1) if loc else m.group(1), "line": None,
-                             "outdated": False, "url": review.get("html_url"),
-                             "tag": f"{m.group(1).lower()}, in the review body: no thread",
-                             "body": body.strip()})
-        unparsed = int(m.group(2)) - len(items) - section.count(NITPICK)
-        for _ in range(max(unparsed, 0)):
-            findings.append({"path": f"{m.group(1)} comments", "line": None, "outdated": False,
-                             "url": review.get("html_url"), "tag": "not parsed: read the review body",
-                             "body": ""})
+            add(loc.group(1) if loc else m.group(1), kind, body.strip())
+        for _ in range(int(m.group(2) or m.group(3)) - len(items)):
+            add(f"{m.group(1)} comments", f"{kind}, not parsed: read the review body", "")
+    if not kinds_seen and any(f"{k} comments" in text for k in BODY_KINDS):
+        add("review body", "not parsed: read the review body", "")
     return findings
 
 
