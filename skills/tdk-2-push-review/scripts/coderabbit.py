@@ -28,10 +28,10 @@ state=success. Only the description tells them apart:
 Subcommands:
   threads  --pr N [--sha S]  list unresolved non-nitpick CodeRabbit findings and
                              the head's review state (S defaults to the PR head).
-  wait     --pr N [--sha S] [--since T]
+  wait     --pr N [--sha S] [--after-nudge]
                              poll until the head leaves pending, then do as threads.
-                             After a nudge, pass T = the nudge time (UTC ISO 8601,
-                             `date -u +%FT%TZ`): older statuses then count as pending.
+                             --after-nudge: statuses older than the newest
+                             `@coderabbitai review` comment count as pending.
 
 Exit codes (both subcommands):
   0  head reviewed, findings remain     5  head reviewed, clean (ACTIONABLE: 0)
@@ -144,6 +144,17 @@ def unresolved_findings(pr, repo):
     return findings
 
 
+def nudge_time(pr, repo):
+    """created_at of the newest human `@coderabbitai review` comment on the PR."""
+    times = [c.get("created_at") or "" for c in api_list(f"repos/{repo}/issues/{pr}/comments")
+             if (c.get("user") or {}).get("type") != "Bot"
+             and "@coderabbitai review" in (c.get("body") or "")]
+    if not max(times, default=""):
+        sys.stderr.write(f"--after-nudge: no '@coderabbitai review' comment on PR #{pr}.\n")
+        sys.exit(2)
+    return max(times)
+
+
 def head_state(pr, repo, sha, since=None):
     """(state, detail) of CodeRabbit's run on commit SHA; see the module docstring."""
     statuses = [st for st in api_list(f"repos/{repo}/commits/{sha}/statuses?per_page=100")
@@ -183,10 +194,13 @@ def next_review_wait(pr, repo):
             continue
         named, updated = m.group(1).strip(), c.get("updated_at") or ""
         mins = MINUTES.match(named)
-        if not mins or not updated:
+        try:
+            written = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+        except ValueError:
+            written = None
+        if not mins or not written:
             return f"{named} as of {updated or 'an unknown time'}"
-        elapsed = (datetime.now(timezone.utc)
-                   - datetime.fromisoformat(updated.replace("Z", "+00:00"))).total_seconds() / 60
+        elapsed = (datetime.now(timezone.utc) - written).total_seconds() / 60
         left = int(mins.group(1)) - int(elapsed)
         if left <= 0:
             return f"0 minutes: quota should be free now ({named} as of {updated})"
@@ -228,7 +242,7 @@ def main():
     p.add_argument("cmd", choices=["threads", "wait"])
     p.add_argument("--pr", required=True, type=int)
     p.add_argument("--sha")
-    p.add_argument("--since")
+    p.add_argument("--after-nudge", action="store_true")
     p.add_argument("--repo")
     p.add_argument("--timeout", type=int, default=1200)
     p.add_argument("--interval", type=int, default=45)
@@ -241,9 +255,10 @@ def main():
         sys.exit(report(a.pr, repo, sha, *head_state(a.pr, repo, sha)))
 
     if a.cmd == "wait":
+        since = nudge_time(a.pr, repo) if a.after_nudge else None
         deadline = time.time() + a.timeout
         while True:
-            state, detail = head_state(a.pr, repo, sha, a.since)
+            state, detail = head_state(a.pr, repo, sha, since)
             if state != PENDING:
                 sys.exit(report(a.pr, repo, sha, state, detail))
             if time.time() >= deadline:
