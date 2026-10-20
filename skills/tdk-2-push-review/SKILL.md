@@ -76,6 +76,8 @@ This is the skip rule; other skills point here.
 
 A PR may open with `@coderabbitai ignore` in its description only when it changes no behaviour: docs that only people read (README, docs/, CHANGELOG), version bumps and release PRs, and review-kit sync PRs in spokes. Never code, scripts, CI, config, skills, prompts or lens text, CLAUDE.md/AGENTS.md, or anything touching auth, secrets or infra. Judge a file by what it does, not its extension: a .md an agent or script loads is code. The line must be in the body at `gh pr create`; added later, the opening review has already run. Deleting the line opts back in from the next commit. This rule holds until codex-review-kit issue #76 reaches stage 2 (sampling).
 
+CodeRabbit matches the command anywhere in the description, in backticks or a quote too. A PR that does not skip must not mention it in its body.
+
 A review-kit sync PR qualifies only when every file it changes is a synced file in the spoke's `OPERATING.md` ("Everything else the kit installs is synced"); for those files the "never" list gives way.
 
 A skipped PR still runs Step 3's `wait` once, which confirms the skip (exit 6), and the Step 5 summary says it skipped and why it qualifies. A PM checks the diff against this rule before GO.
