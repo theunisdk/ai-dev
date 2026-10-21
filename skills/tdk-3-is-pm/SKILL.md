@@ -87,7 +87,7 @@ WHEN DONE: run tdk-2-push-review through Step 4b (CI verified, postmortem run), 
 session <pm-session-name> with SendMessage and wait. In a repo with the review kit, the pre-PR
 review is the kit's `/review`, not a subagent review (tdk-2-push-review Step 1b). The report quotes
 the `pre-pr-review:` line (the `/review` verdict SHA, or subagent/fallback and why), the `review-postmortem:`
-and the `review-tune:` lines verbatim, whatever they say. Merge only on my GO, as tdk-2-push-review Step 5
+and the `review-tune:` lines verbatim, whatever they say, and the `CodeRabbit:` line when it is not installed. Merge only on my GO, as tdk-2-push-review Step 5
 says for a managed worker; it ends with removing your worktree. Do not touch main otherwise.
 
 MESSAGE ME ONLY WHEN: you are done, you are blocked, or a decision would change scope or a
@@ -152,6 +152,11 @@ Send GO only when **all** of these hold:
     AGENTS.md/CLAUDE.md says this PR, or this push, needs no CodeRabbit review. Check it yourself.
   - No `CodeRabbit` status, but a non-empty CodeRabbit review object on the head — passes only in a
     repo whose earlier PRs carry no `CodeRabbit` statuses either (commit status turned off).
+  - No `CodeRabbit` status, and the worker reports `CodeRabbit: not installed (…)` — passes only when
+    its `pre-pr-review:` line names the head SHA (a `/review` verdict, or a subagent review, that
+    covers it) with every finding dispositioned, and the head has no `CodeRabbit` status at all:
+    `gh api repos/<owner>/<repo>/commits/<headRefOid>/status -q '[.statuses[]|select(.context=="CodeRabbit")]|length'`
+    prints `0`. Any `CodeRabbit` status on the head means it is installed; the rows here apply.
   - `Review rate limited`, `Review in progress`, any other description, or no `CodeRabbit` status
     otherwise — never a pass. CodeRabbit has not reviewed this head.
 - any review object you rely on as evidence is on the head SHA. A verdict on an older commit says
@@ -159,8 +164,9 @@ Send GO only when **all** of these hold:
   clean incremental pass on the head leaves `Review completed` and no new review object.
 - CI passed on its own terms: read the job result, not the check's conclusion. A job that is green
   because every step was skipped is not a pass.
-- the worker reported `ACTIONABLE: 0` with head state `REVIEWED`, or `SKIPPED` on a PR that passed
-  the skip check above, along with its dispositions. `ACTIONABLE: 0` with `RATE LIMITED` or
+- the worker reported `ACTIONABLE: 0` with head state `REVIEWED`, `SKIPPED` on a PR that passed
+  the skip check above, or `CodeRabbit: not installed` on a PR that passed that check, along with
+  its dispositions. `ACTIONABLE: 0` with `RATE LIMITED` or
   `UNKNOWN` is not a pass. A count above 0 passes only when every remaining item is tagged
   `in the review body: no thread` and the worker answered each one, as (b) or (c), in a PR comment.
 - the report carries the `pre-pr-review:` line, the `review-postmortem:` first line, the `record`
