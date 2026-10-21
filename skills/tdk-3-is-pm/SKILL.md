@@ -87,7 +87,8 @@ WHEN DONE: run tdk-2-push-review through Step 4b (CI verified, postmortem run), 
 session <pm-session-name> with SendMessage and wait. In a repo with the review kit, the pre-PR
 review is the kit's `/review`, not a subagent review (tdk-2-push-review Step 1b). The report quotes
 the `pre-pr-review:` line (the `/review` verdict SHA, or subagent/fallback and why), the `review-postmortem:`
-and the `review-tune:` lines verbatim, whatever they say, and the `CodeRabbit:` line when it is not installed. Merge only on my GO, as tdk-2-push-review Step 5
+and the `review-tune:` lines verbatim, whatever they say, and the `CodeRabbit:` line when it is not
+installed. Merge only on my GO, as tdk-2-push-review Step 5
 says for a managed worker; it ends with removing your worktree. Do not touch main otherwise.
 
 MESSAGE ME ONLY WHEN: you are done, you are blocked, or a decision would change scope or a
@@ -154,9 +155,11 @@ Send GO only when **all** of these hold:
     repo whose earlier PRs carry no `CodeRabbit` statuses either (commit status turned off).
   - No `CodeRabbit` status, and the worker reports `CodeRabbit: not installed (…)` — passes only when
     its `pre-pr-review:` line names the head SHA (a `/review` verdict, or a subagent review, that
-    covers it) with every finding dispositioned, and the head has no `CodeRabbit` status at all:
-    `gh api repos/<owner>/<repo>/commits/<headRefOid>/status -q '[.statuses[]|select(.context=="CodeRabbit")]|length'`
-    prints `0`. Any `CodeRabbit` status on the head means it is installed; the rows here apply.
+    covers it) with every finding dispositioned, the PR's head has no `CodeRabbit` status
+    (`gh pr view <n> -R <owner/repo> --json statusCheckRollup -q '[.statusCheckRollup[]|select(.context=="CodeRabbit")]|length'`
+    prints `0`), and CodeRabbit left no review or comment on the PR (the reviews command above, and
+    `gh api repos/<owner>/<repo>/issues/<n>/comments -q '[.[]|select(.user.login=="coderabbitai[bot]")]|length'`
+    prints `0`). Any CodeRabbit status, review or comment means it is installed; the rows here apply.
   - `Review rate limited`, `Review in progress`, any other description, or no `CodeRabbit` status
     otherwise — never a pass. CodeRabbit has not reviewed this head.
 - any review object you rely on as evidence is on the head SHA. A verdict on an older commit says
@@ -179,7 +182,8 @@ No review object at all is not a failure — CodeRabbit creates one only when it
 status description above is what confirms a clean pass.
 
 If any gate fails, do not send GO and do not fix it yourself: send it back to the worker with what
-failed. If that worker has already spent its two `tdk-2` fix rounds, escalate.
+failed. If that worker has already spent its two `tdk-2` fix rounds (with no CodeRabbit: two send-backs),
+escalate.
 
 Send `GO <n> <headRefOid>` — the full SHA you verified, so the merge refuses a head that moved. The
 worker merges, removes `<repo>/.claude/worktrees/<task>` and its branch, and reports merged. Then
