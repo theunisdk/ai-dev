@@ -81,7 +81,9 @@ if ! top="$(git rev-parse --show-toplevel)"; then echo "CodeRabbit: unknown (loo
 else decl=""; bad=""
   for f in AGENTS.md CLAUDE.md; do
     [ -e "$top/$f" ] || { [ -L "$top/$f" ] && bad="$f"; continue; }
-    awk '/^[[:space:]]*(```|~~~)/ { fence = !fence; next } !fence && /^CodeRabbit: none[[:space:]]*$/ { m = 1 } END { exit !m }' "$top/$f"
+    awk '!fence && /^[[:space:]]*(```|~~~)/ { match($0, /`+|~+/); fence = substr($0, RSTART, RLENGTH); next }
+      fence && $0 ~ "^[[:space:]]*" fence "+[[:space:]]*$" { fence = ""; next }
+      !fence && /^CodeRabbit: none[[:space:]]*$/ { m = 1 } END { exit !m }' "$top/$f"
     case $? in 0) decl="$f" ;; 1) ;; *) bad="$f" ;; esac
   done
   if [ -n "$decl" ]; then echo "CodeRabbit: not installed (declared in $decl)"
@@ -93,7 +95,7 @@ fi
 ```
 The `CodeRabbit:` line it prints decides the rest of this skill:
 
-- `installed (…)`: everything below applies as written. A repo whose recent PRs carry CodeRabbit statuses counts as installed, even if it is rate limited now. A line ending `none on the N newer merged PRs …` may mean CodeRabbit was removed; Step 3's exit-4 row uses it.
+- `installed (…)`: everything below applies as written. A repo whose recent PRs carry CodeRabbit statuses counts as installed, even if it is rate limited now. A line ending `none on the N newer merged PRs …` may mean CodeRabbit was removed. If the root AGENTS.md or CLAUDE.md also says in prose that there is no CodeRabbit, report it (a managed worker: to its PM) before Step 3 and recommend the declaration. Otherwise Step 3's exit-4 row uses it.
 - `not installed (declared in <file>)` or `not installed (detected: …)`: follow "No CodeRabbit" below. On `detected`, recommend in the Step 5 summary that the repo add the `CodeRabbit: none` line.
 - `unknown (lookup failed: …)`: never read it as not installed. Fix the cause (gh auth, network) and re-run. If it still fails, carry on as installed and quote the line in the Step 5 summary.
 
@@ -142,7 +144,7 @@ fresh review surface, so round N's hasty fixes become round N+1's findings.
      | 6 | **skipped** | Not reviewed. **Don't nudge** with `@coderabbitai review`: that spends the review the skip saved. Bare `Review skipped` (`@coderabbitai ignore`): if the PR qualifies under the skip rule (Step 2), go to Step 4 and say so in the Step 5 summary. If it does not qualify, the skip was a mistake: delete the `@coderabbitai ignore` line from the body and post `@coderabbitai review` once. `Review skipped: <reason>` (repo config): follow the repo's AGENTS.md/CLAUDE.md on whether this PR or push needs a review; nudge once only if it says so. If `ACTIONABLE` > 0 (e.g. incremental reviews disabled after a fix push), triage per item 4; on each thread the push fixed, reply with the fix commit and resolve it. |
      | 7 | **rate limited** | Not reviewed. Wait the time the output names; it already subtracts the time since CodeRabbit wrote it. When none is named, post `@coderabbitai rate limit` (it spends no review) and wait the time its reply names. Then post `@coderabbitai review` **once** and run `wait --after-nudge`. Rate limited a second time: report it (a managed worker: to its PM) rather than nudging again. |
      | 8 | **unknown** status | Not reviewed. Report the description it printed (a managed worker: to its PM); don't nudge. |
-     | 4 | timed out, still pending | Read `gh api repos/<owner>/<repo>/commits/<SHA>/statuses`. `Review in progress`: CodeRabbit is still working; run `wait` again, don't nudge. No `CodeRabbit` status at all on the head: if earlier PR heads carry `CodeRabbit` statuses, it never started; nudge once and `wait --after-nudge`. If they don't, the repo has CodeRabbit's commit status off, so a clean pass leaves no trace: report it rather than nudging. After `--after-nudge`, with only statuses older than the nudge: CodeRabbit ignored the nudge; report it and don't nudge again. When the Step 2 line ended `none on the N newer merged PRs …` and the head has no `CodeRabbit` status, CodeRabbit was likely removed: don't nudge; report it and recommend the Step 2 declaration. |
+     | 4 | timed out, still pending | Read `gh api repos/<owner>/<repo>/commits/<SHA>/statuses`. `Review in progress`: CodeRabbit is still working; run `wait` again, don't nudge. No `CodeRabbit` status at all on the head: if the Step 2 line ended `none on the N newer merged PRs …`, CodeRabbit was likely removed: don't nudge; report it and recommend the Step 2 declaration. Otherwise, if earlier PR heads carry `CodeRabbit` statuses, it never started; nudge once and `wait --after-nudge`. If they don't, the repo has CodeRabbit's commit status off, so a clean pass leaves no trace: report it rather than nudging. After `--after-nudge`, with only statuses older than the nudge: CodeRabbit ignored the nudge; report it and don't nudge again. |
      | 2 | a `gh` call failed | Fix the cause (auth, network) and re-run. |
 
 3. **If exit 5 (`ACTIONABLE: 0`, head `REVIEWED`) → done.** Go to Step 4. Also done, with no push and no nudge: exit 0 where every remaining item is tagged `in the review body: no thread` and you answered each one as (b) or (c) in a PR comment (item 4).
