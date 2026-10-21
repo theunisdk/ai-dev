@@ -38,8 +38,13 @@ Subcommands:
                              poll until the head leaves pending, then do as threads.
                              --after-nudge: statuses older than the newest
                              `@coderabbitai review` comment count as pending.
+  detect                     print `CodeRabbit: installed|not installed (…)` from
+                             CodeRabbit's statuses, reviews and comments on the
+                             repo's last 10 merged PRs; installed names any newer
+                             PRs with none. No merged PRs: assumed installed.
+                             Exit 0 installed, 9 not installed, 2 a gh call failed.
 
-Exit codes (both subcommands):
+Exit codes (threads and wait):
   0  head reviewed, findings remain     5  head reviewed, clean (ACTIONABLE: 0)
   6  head skipped — not reviewed        7  head rate limited — not reviewed
   8  unknown status — not reviewed      2  a gh/git call failed
@@ -186,6 +191,34 @@ def repo_posts_status(pr, repo):
                for st in json.loads(run(["gh", "api", f"repos/{repo}/commits/{sha}/statuses"])))
 
 
+def bot_trace(repo, pr):
+    """What CodeRabbit left on merged PR {number, headRefOid}, or None."""
+    if any(st.get("context") == STATUS_CONTEXT
+           for st in api_list(f"repos/{repo}/commits/{pr['headRefOid']}/statuses?per_page=100")):
+        return "status"
+    for kind, path in (("review", "pulls/{}/reviews"), ("comment", "issues/{}/comments")):
+        if any((c.get("user") or {}).get("login") == REST_BOT
+               for c in api_list(f"repos/{repo}/{path.format(pr['number'])}")):
+            return kind
+    return None
+
+
+def detect(repo):
+    """(installed, detail) from CodeRabbit's trace on the repo's last 10 merged PRs."""
+    prs = json.loads(run(["gh", "pr", "list", "-R", repo, "--state", "merged", "--limit", "10",
+                          "--json", "number,headRefOid"]))
+    if not prs:
+        return True, "assumed: no merged PRs to check"
+    for i, p in enumerate(prs):
+        trace = bot_trace(repo, p)
+        if trace:
+            newer = ", ".join(f"#{q['number']}" for q in prs[:i])
+            return True, f"CodeRabbit {trace} on #{p['number']}" + (
+                f"; none on the {i} newer merged PRs {newer}" if i else "")
+    return False, (f"detected: no CodeRabbit status, review or comment on the last {len(prs)} merged PRs, "
+                   f"#{prs[-1]['number']}–#{prs[0]['number']}")
+
+
 def head_state(pr, repo, sha, since=None):
     """(state, detail) of CodeRabbit's run on commit SHA; see the module docstring."""
     statuses = [st for st in api_list(f"repos/{repo}/commits/{sha}/statuses?per_page=100")
@@ -304,8 +337,8 @@ def print_findings(pr, repo, head, extra):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("cmd", choices=["threads", "wait"])
-    p.add_argument("--pr", required=True, type=int)
+    p.add_argument("cmd", choices=["threads", "wait", "detect"])
+    p.add_argument("--pr", type=int)
     p.add_argument("--sha")
     p.add_argument("--after-nudge", action="store_true")
     p.add_argument("--repo")
@@ -314,6 +347,12 @@ def main():
     a = p.parse_args()
 
     repo = a.repo or current_repo()
+    if a.cmd == "detect":
+        installed, detail = detect(repo)
+        print(f"CodeRabbit: {'installed' if installed else 'not installed'} ({detail})")
+        sys.exit(0 if installed else 9)
+    if a.pr is None:
+        p.error(f"{a.cmd} needs --pr")
     sha = a.sha or pr_head(a.pr, repo)
 
     if a.cmd == "threads":

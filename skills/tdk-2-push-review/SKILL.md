@@ -7,6 +7,8 @@ description: Push the current branch, open a PR, and drive it through CodeRabbit
 
 Take a feature branch with finished work all the way to merged: **push → open PR → drive CodeRabbit's review → confirm → squash-merge to main.** The heart of it is the CodeRabbit round: verify each finding, fix what's real in one batch, answer the rest in writing. **At most two fix rounds** — the terminal state is not "zero comments", it is "every finding dispositioned": fixed, logged as an issue, or rejected on the thread with a reason. Unbounded looping is how one PR eats seven rounds — each hasty fix-push is fresh review surface that generates the next round's findings.
 
+In a repo without CodeRabbit (Step 2 decides), there are no rounds: the Step 1b pre-PR review is the gate.
+
 This is a live-repo workflow (real pushes, a real PR, a real merge), so move deliberately and never merge without the user's go-ahead.
 
 ## The one rule that's non-negotiable
@@ -65,10 +67,43 @@ The first head CodeRabbit reviews is the one Step 4b's postmortem scores, so its
 
 ## Step 2 — Open (or reuse) the PR
 
+- Before `gh pr create`, decide once whether the repo has CodeRabbit (below).
 - If a PR already exists for this branch (`gh pr view --json number,url`), reuse it — don't open a duplicate.
 - Otherwise: `gh pr create --base main`. Title = the Conventional Commit summary of the work. Body = a short summary plus issue-closing keywords. Use a **per-issue** closing keyword (`Closes #12, closes #15`) — a comma list like `Closes #12, #15` only closes the first.
-- Decide now whether the PR skips CodeRabbit (below). If it qualifies, put `@coderabbitai ignore` on its own line in the body you pass to `gh pr create`.
+- Where CodeRabbit is installed, decide now whether the PR skips it (below). If it qualifies, put `@coderabbitai ignore` on its own line in the body you pass to `gh pr create`.
 - Capture the PR number; you'll pass it to the helper script throughout.
+
+### Does this repo have CodeRabbit?
+
+A repo without it declares so with the line `CodeRabbit: none`, on a line of its own, in its root `AGENTS.md` or `CLAUDE.md`. Prose saying the same thing doesn't count, and neither does the line inside a fenced code block. When nothing is declared, `coderabbit.py detect` reads CodeRabbit's statuses, reviews and comments on the repo's last 10 merged PRs.
+```bash
+if ! top="$(git rev-parse --show-toplevel)"; then echo "CodeRabbit: unknown (lookup failed: git rev-parse failed)"
+else decl=""; bad=""
+  for f in AGENTS.md CLAUDE.md; do
+    [ -e "$top/$f" ] || { [ -L "$top/$f" ] && bad="$f"; continue; }
+    awk '!fence && /^[[:space:]]*(```|~~~)/ { match($0, /`+|~+/); fence = substr($0, RSTART, RLENGTH); next }
+      fence && $0 ~ "^[[:space:]]*" fence "+[[:space:]]*$" { fence = ""; next }
+      !fence && /^CodeRabbit: none[[:space:]]*$/ { m = 1 } END { exit !m }' "$top/$f"
+    case $? in 0) decl="$f" ;; 1) ;; *) bad="$f" ;; esac
+  done
+  if [ -n "$decl" ]; then echo "CodeRabbit: not installed (declared in $decl)"
+  elif [ -n "$bad" ]; then echo "CodeRabbit: unknown (lookup failed: cannot read $top/$bad)"
+  else python3 ~/.claude/skills/tdk-2-push-review/scripts/coderabbit.py detect; rc=$?
+    case $rc in 0|9) ;; *) echo "CodeRabbit: unknown (lookup failed: coderabbit.py detect exited $rc)" ;; esac
+  fi
+fi
+```
+The `CodeRabbit:` line it prints decides the rest of this skill:
+
+- `installed (…)`: everything below applies as written. A repo whose recent PRs carry CodeRabbit statuses counts as installed, even if it is rate limited now. A line ending `none on the N newer merged PRs …` may mean CodeRabbit was removed. If the root AGENTS.md or CLAUDE.md also says in prose that there is no CodeRabbit, report it (a managed worker: to its PM) before Step 3, recommend the declaration, and wait for the answer. Once the line is in this branch (added here, or merged to main and main merged into this branch), re-run the check above and follow its new line. If the answer is that CodeRabbit is still installed, go on to Step 3. If the docs say nothing about it, Step 3's exit-4 row uses the line.
+- `not installed (declared in <file>)` or `not installed (detected: …)`: follow "No CodeRabbit" below. On `detected`, recommend in the Step 5 summary that the repo add the `CodeRabbit: none` line.
+- `unknown (lookup failed: …)`: never read it as not installed. Fix the cause (gh auth, network) and re-run. If it still fails, carry on as installed and quote the line in the Step 5 summary.
+
+### No CodeRabbit
+
+There is no `@coderabbitai ignore` decision, and Step 3 doesn't run: no `wait`, no nudge, no fix rounds. Go from Step 2 to Step 4.
+
+The gate is the Step 1b review. It must cover the head you report, with every finding dispositioned: fixed, logged as an issue, or rejected with a written reason. A `/review` verdict names its SHA in the `pre-pr-review:` line. After a subagent review, add the SHA it reviewed to your line, e.g. `pre-pr-review: subagent — no review kit in this repo; covers <sha>`. If your PM sends work back, review every fix commit before pushing: in a kit repo, Step 1b item 3's path for a verdict SHA that is an ancestor of HEAD; elsewhere, a scoped subagent review of the fixes. Then report the line for the new head. Each send-back counts as one of the two rounds; after the second, bring what remains to the PM rather than pushing again.
 
 ### Skipping CodeRabbit
 
@@ -109,7 +144,7 @@ fresh review surface, so round N's hasty fixes become round N+1's findings.
      | 6 | **skipped** | Not reviewed. **Don't nudge** with `@coderabbitai review`: that spends the review the skip saved. Bare `Review skipped` (`@coderabbitai ignore`): if the PR qualifies under the skip rule (Step 2), go to Step 4 and say so in the Step 5 summary. If it does not qualify, the skip was a mistake: delete the `@coderabbitai ignore` line from the body and post `@coderabbitai review` once. `Review skipped: <reason>` (repo config): follow the repo's AGENTS.md/CLAUDE.md on whether this PR or push needs a review; nudge once only if it says so. If `ACTIONABLE` > 0 (e.g. incremental reviews disabled after a fix push), triage per item 4; on each thread the push fixed, reply with the fix commit and resolve it. |
      | 7 | **rate limited** | Not reviewed. Wait the time the output names; it already subtracts the time since CodeRabbit wrote it. When none is named, post `@coderabbitai rate limit` (it spends no review) and wait the time its reply names. Then post `@coderabbitai review` **once** and run `wait --after-nudge`. Rate limited a second time: report it (a managed worker: to its PM) rather than nudging again. |
      | 8 | **unknown** status | Not reviewed. Report the description it printed (a managed worker: to its PM); don't nudge. |
-     | 4 | timed out, still pending | Read `gh api repos/<owner>/<repo>/commits/<SHA>/statuses`. `Review in progress`: CodeRabbit is still working; run `wait` again, don't nudge. No `CodeRabbit` status at all on the head: if earlier PR heads carry `CodeRabbit` statuses, it never started; nudge once and `wait --after-nudge`. If they don't, the repo has CodeRabbit's commit status off, so a clean pass leaves no trace: report it rather than nudging. After `--after-nudge`, with only statuses older than the nudge: CodeRabbit ignored the nudge; report it and don't nudge again. |
+     | 4 | timed out, still pending | Read `gh api repos/<owner>/<repo>/commits/<SHA>/statuses`. `Review in progress`: CodeRabbit is still working; run `wait` again, don't nudge. No `CodeRabbit` status at all on the head: if the Step 2 line ended `none on the N newer merged PRs …`, CodeRabbit was likely removed: don't nudge; report it and recommend the Step 2 declaration. Otherwise, if earlier PR heads carry `CodeRabbit` statuses, it never started; nudge once and `wait --after-nudge`. If they don't, the repo has CodeRabbit's commit status off, so a clean pass leaves no trace: report it rather than nudging. After `--after-nudge`, with only statuses older than the nudge: CodeRabbit ignored the nudge; report it and don't nudge again. |
      | 2 | a `gh` call failed | Fix the cause (auth, network) and re-run. |
 
 3. **If exit 5 (`ACTIONABLE: 0`, head `REVIEWED`) → done.** Go to Step 4. Also done, with no push and no nudge: exit 0 where every remaining item is tagged `in the review body: no thread` and you answered each one as (b) or (c) in a PR comment (item 4).
@@ -171,7 +206,7 @@ The Lint & Test check is **not** a required status check in this repo, so it won
 
 ## Step 4b — Postmortem (measurement, not a gate)
 
-Solo or managed, record what CodeRabbit caught that the local review missed. Run it in this worktree, where `/review` ran. First check that the kit's command can run unattended:
+Solo or managed, record what CodeRabbit caught that the local review missed. With no CodeRabbit (Step 2), your line is `review-postmortem: skipped — no CodeRabbit on this repo`; skip to the `/review-tune` check. Otherwise run it in this worktree, where `/review` ran. First check that the kit's command can run unattended:
 ```bash
 if ! top="$(git rev-parse --show-toplevel)"; then echo "review-postmortem: failed — version check: git rev-parse failed"
 else f="$top/.claude/commands/review-postmortem.md"
@@ -205,7 +240,7 @@ That line goes in the Step 5 summary too.
 
 ## Step 5 — Confirm, then merge
 
-Present a short summary: PR link, the Step 1b `pre-pr-review:` line, what CodeRabbit findings you fixed, what you logged as issues (with links), what you rejected and why, CI status, the `ACTIONABLE: …` line verbatim from a fresh `coderabbit.py threads --pr <PR>` run just before the summary (it carries the head's state, and counts threads you resolved since the last `wait`), and the Step 4b lines verbatim. A skipped PR also names which part of the skip rule it falls under.
+Present a short summary: PR link, the Step 1b `pre-pr-review:` line, what CodeRabbit findings you fixed, what you logged as issues (with links), what you rejected and why, CI status, the `ACTIONABLE: …` line verbatim from a fresh `coderabbit.py threads --pr <PR>` run just before the summary (it carries the head's state, and counts threads you resolved since the last `wait`), and the Step 4b lines verbatim. A skipped PR also names which part of the skip rule it falls under. With no CodeRabbit, the Step 2 `CodeRabbit: not installed (…)` line replaces the `ACTIONABLE` line, and the findings and dispositions are the Step 1b review's.
 
 **If you are a managed worker**, send that summary to your PM session with `SendMessage` and wait for its `GO <PR> <sha>`. Don't push after reporting unless the PM sends work back; then fix it within your remaining rounds and report the new head. On GO, merge as a command of its own — `-R` keeps gh off your local branch, which you remove below, and `--match-head-commit` refuses a head that moved:
 ```bash
@@ -225,10 +260,11 @@ gh pr merge <PR> --squash --delete-branch
 
 | Need | Command |
 |------|---------|
+| Does the repo have CodeRabbit (after the declaration check) | `coderabbit.py detect` |
 | Wait for review + list findings | `coderabbit.py wait --pr <PR> --sha <SHA>` |
 | Re-list current findings (no wait) | `coderabbit.py threads --pr <PR>` |
 | Nudge CodeRabbit to re-review (spends a review; only per Step 3's exit table) | `gh pr comment <PR> --body "@coderabbitai review"` |
 | Check the review quota (spends nothing) | `gh pr comment <PR> --body "@coderabbitai rate limit"` |
 | Check CI | `gh pr checks <PR>` |
 
-The script keys on **unresolved review threads**, so it correctly tracks findings across every push (a finding raised three rounds ago that was never addressed still shows up). It prints `ACTIONABLE: N — head <sha> <STATE> (…)` as the top line. The exit code is your loop condition: 0 and 5 only when the head was reviewed, 6 skipped, 7 rate limited, 8 an unknown status, and `threads` exits 3 while the head is still pending. `--repo owner/name` overrides the auto-detected repo; `--sha` defaults to the PR's head.
+The script keys on **unresolved review threads**, so it correctly tracks findings across every push (a finding raised three rounds ago that was never addressed still shows up). It prints `ACTIONABLE: N — head <sha> <STATE> (…)` as the top line. The exit code is your loop condition: 0 and 5 only when the head was reviewed, 6 skipped, 7 rate limited, 8 an unknown status, and `threads` exits 3 while the head is still pending. `detect` exits 0 installed, 9 not installed, and 2 when a `gh` call failed; any other exit is a failed lookup too. `--repo owner/name` overrides the auto-detected repo; `--sha` defaults to the PR's head.
