@@ -39,16 +39,17 @@ developer with five sessions queued behind you.
 
 `claude-rc <link> <dir> <reason>` starts this skill with only a launch reason, such as
 `desktop-sessions` or `client ui bug`. A reason alone is not a goal, even one that names work
-(`fix-login-form`). When neither the arguments nor the conversation state a goal, or you can't tell,
-hold Step 1: orient, then wait. Arguments that state work to do, such as `client-ui-bug fix the login
-form`, carry a goal and go to Step 1.
+(`fix-login-form`). When neither the arguments nor the user's messages state a goal, or you can't
+tell, hold Step 1: orient, then wait. Only arguments that clearly carry work beyond a reason, such as
+`client-ui-bug fix the login form`, go to Step 1.
 
 Orient with cheap read-only checks only: the README (`tdk-1-start` has usually read it), recent
 commits, open PRs, `git worktree list`, and the `tmux ls` sessions whose names carry this repo's
 folder name or this PM's link. No subagents while orienting, no looking into the reason, no proposed
-goal or breakdown, no spawning. Post at most five lines: the arguments as received, what is in
-flight, and any check that failed (a failed check is not "nothing open"). End by asking the user
-what's next, and wait. If the reply gives a goal, Step 1 starts from it.
+goal or breakdown, no spawning. Post at most five lines: the arguments as received (`(none)` if
+empty), what is in flight, and any check that failed (a failed check is not "nothing open"). End by
+asking the user what's next, and wait. If the reply gives a goal, Step 1 starts from it; otherwise
+answer it and keep waiting.
 
 ## Step 1 — Establish the goal
 
