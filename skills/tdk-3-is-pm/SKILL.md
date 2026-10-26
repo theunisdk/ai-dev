@@ -35,6 +35,19 @@ You may not:
 The rationalization to watch for is *"it's faster if I just…"*. It is faster, once. Then you are a
 developer with five sessions queued behind you.
 
+## Launched without a goal
+
+`claude-rc <link> <dir> <reason>` starts this skill with only a launch reason, such as
+`desktop-sessions` or `client ui bug`. A reason is not a goal. When the arguments are empty, only a
+reason, or you can't tell which, skip Step 1: orient, then wait. Arguments that ask for a change,
+such as `client-ui-bug fix the login form`, carry a goal and go to Step 1.
+
+Orient with cheap read-only checks only: the README (`tdk-1-start` has usually read it), recent
+commits, open PRs, `git worktree list`, and the live `tmux ls` sessions for this repo. No subagents,
+no looking into the reason, no proposed goal or breakdown, no spawning. Post at most five lines: the
+launch reason, what is in flight, and any check that failed (a failed check is not "nothing open").
+End by asking the user what's next, and wait. The reply is the goal; Step 1 starts from it.
+
 ## Step 1 — Establish the goal
 
 Nothing spawns until you can state, in your own words: the goal, what done means, the constraints,
@@ -255,6 +268,7 @@ can see in the conversation; if you can't tell whether the user gave go, ask.
 | Thought | Reality |
 |---------|---------|
 | "It's a one-line fix, I'll just do it" | That is the whole failure mode. It goes to a worker. |
+| "The launch reason says what to do, I'll look into it" | A reason is not a goal. Orient, post five lines, ask. |
 | "The worker's been quiet, it's probably fine" | Quiet is ambiguous. Ask. |
 | "CI is green, send GO" | Green means the job finished. Read the verdict against the head SHA. |
 | "Everything merged, I'll start the deploy — the user will want it anyway" | No go, no deploy. Ask once, with the target named. |
