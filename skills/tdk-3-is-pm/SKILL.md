@@ -40,8 +40,8 @@ developer with five sessions queued behind you.
 `claude-rc <link> <dir> <reason>` starts this skill with only a launch reason, such as
 `desktop-sessions` or `client ui bug`. A reason alone is not a goal, even one that names work
 (`fix-login-form`). Go to Step 1 only when the arguments clearly carry work beyond a reason
-(`client-ui-bug fix the login form`), or the user asked for it in a message of their own ("you're
-the PM for the login redesign"). Otherwise, or if you can't tell, hold Step 1: orient, then wait.
+(`client-ui-bug fix the login form`), or the user asked for it in a message besides the one that
+launched this skill ("you're the PM for the login redesign"). Otherwise, or if you can't tell, hold Step 1: orient, then wait.
 
 Orient with cheap read-only checks only: the README (`tdk-1-start` has usually read it), recent
 commits, open PRs, `git worktree list`, and the `tmux ls` sessions whose names carry this repo's
