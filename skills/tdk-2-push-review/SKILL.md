@@ -1,6 +1,6 @@
 ---
 name: tdk-2-push-review
-description: Push the current branch, open a PR, and drive it through CodeRabbit's review — a capped pre-PR review (one full pass, one scoped re-review of the fixes), then at most two fix rounds, after which every remaining finding is dispositioned (fixed, issue-logged, or rejected with a written reason) rather than looped on — then pause for confirmation before merging to main. Explicit-invocation only: use when the user says "tdk-2-push-review" (or invokes it directly). Do NOT auto-trigger on a bare "push this" or "open a PR".
+description: Push the current branch, open a PR, and drive it through CodeRabbit's review — a capped pre-PR review (one full pass, at most one scoped re-review of the fixes), then at most two fix rounds, after which every remaining finding is dispositioned (fixed, issue-logged, or rejected with a written reason) rather than looped on — then pause for confirmation before merging to main. Explicit-invocation only: use when the user says "tdk-2-push-review" (or invokes it directly). Do NOT auto-trigger on a bare "push this" or "open a PR".
 ---
 
 # tdk-2-push-review
@@ -42,7 +42,7 @@ fi
 ```
 On `kit`, the pre-PR review **is** the kit's `/review`; it replaces the subagent review. Otherwise the printed line is your `pre-pr-review:` line: run the subagent review from the global CLAUDE.md ("Before pushing a branch or opening a PR"), then push.
 
-**The cap, in both paths:** one full review pass, then at most one scoped re-review of the fix commits. After that, fix only Critical/High findings. Disposition every other finding: log it as an issue, or reject it with a written reason in the PR. Never start a third pass on your own. A Critical/High still open after the second pass goes to the user (a managed worker: its PM) as a decision, not another loop.
+**The cap, in both paths:** one full review pass, then at most one scoped re-review of the fix commits. After that, fix only Critical/High findings. Disposition every other finding: log it as an issue, or reject it with a written reason in the PR. Never start a third pass on your own. A Critical/High fix after the last pass gets only the scoped check that brings the verdict to HEAD (item 3). Any Critical/High still open after that goes to the user (a managed worker: its PM) as a decision, not another loop.
 
 In a kit repo:
 
@@ -105,7 +105,7 @@ The `CodeRabbit:` line it prints decides the rest of this skill:
 
 There is no `@coderabbitai ignore` decision, and Step 3 doesn't run: no `wait`, no nudge, no fix rounds. Go from Step 2 to Step 4.
 
-The gate is the Step 1b review, held to the same cap: one full pass and one scoped re-review, no more because CodeRabbit is absent. It must cover the head you report, with every finding dispositioned: fixed, logged as an issue, or rejected with a written reason. A `/review` verdict names its SHA in the `pre-pr-review:` line. After a subagent review, add the SHA it reviewed to your line, e.g. `pre-pr-review: subagent — no review kit in this repo; covers <sha>`. If your PM sends work back, review every fix commit before pushing: in a kit repo, Step 1b item 3's path for a verdict SHA that is an ancestor of HEAD; elsewhere, a scoped subagent review of the fixes. Then report the line for the new head. Each send-back counts as one of the two rounds; after the second, bring what remains to the PM rather than pushing again.
+The gate is the Step 1b review, held to the same cap, plus one scoped review of each PM send-back's fixes (below). No extra passes when CodeRabbit is absent. It must cover the head you report, with every finding dispositioned: fixed, logged as an issue, or rejected with a written reason. A `/review` verdict names its SHA in the `pre-pr-review:` line. After a subagent review, add the SHA it reviewed to your line, e.g. `pre-pr-review: subagent — no review kit in this repo; covers <sha>`. If your PM sends work back, review every fix commit before pushing: in a kit repo, Step 1b item 3's path for a verdict SHA that is an ancestor of HEAD; elsewhere, a scoped subagent review of the fixes. Then report the line for the new head. Each send-back counts as one of the two rounds; after the second, bring what remains to the PM rather than pushing again.
 
 ### Skipping CodeRabbit
 
