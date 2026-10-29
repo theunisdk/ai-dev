@@ -109,7 +109,8 @@ installed. Merge only on my GO, as tdk-2-push-review Step 5 says for a managed w
 removing your worktree. Do not touch main otherwise.
 
 MESSAGE ME ONLY WHEN: you are done, you are blocked, or a decision would change scope or a
-contract. Not for progress.
+contract. Not for progress. Every message to me (done, blocked, a decision needed) goes by
+SendMessage: text left in your own pane never reaches me.
 
 IF BLOCKED: say what you tried, what you need, and who or what can supply it.
 ```
@@ -142,7 +143,9 @@ worker. Only escalate if the *feature* changes.
 
 **Never let a worker go dark.** A silent session is ambiguous — still working, or finished and
 waiting at a prompt? The two look identical from here, so resolve it with `ListAgents` and a direct
-`SendMessage` rather than assuming.
+`SendMessage` rather than assuming. When `ListAgents` shows a worker `waiting` or `idle` with no
+report, read its pane (`tmux capture-pane -p -t "<name>:"`) or message it: it may be holding a
+question it never sent, or sitting at a permission prompt only the user can answer.
 
 ## Step 5 — Decide the merge (only you send GO)
 
