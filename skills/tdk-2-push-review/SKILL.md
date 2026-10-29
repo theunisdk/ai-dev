@@ -42,7 +42,7 @@ fi
 ```
 On `kit`, the pre-PR review **is** the kit's `/review`; it replaces the subagent review. Otherwise the printed line is your `pre-pr-review:` line: run the subagent review from the global CLAUDE.md ("Before pushing a branch or opening a PR"), then push.
 
-**The cap, in both paths:** one full review pass, then at most one scoped re-review of the fix commits. After that, fix only Critical/High findings. Disposition every other finding: log it as an issue, or reject it with a written reason in the PR. Never start a third pass on your own. A Critical/High fix after the last pass gets only the scoped check that brings the verdict to HEAD (item 3). Any Critical/High still open after that goes to the user (a managed worker: its PM) as a decision, not another loop.
+**The cap, in both paths:** one full review pass, then at most one scoped re-review of the fix commits. After that, fix only Critical/High findings. Disposition every other finding: log it as an issue, or reject it with a written reason in the PR. Never start a third pass on your own. A Critical/High fix after the last pass gets only the scoped check that brings the review to HEAD (kit: item 3; otherwise one scoped subagent review of that fix). Any Critical/High still open after that goes to the user (a managed worker: its PM) as a decision, not another loop.
 
 In a kit repo:
 
