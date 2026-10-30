@@ -10,11 +10,11 @@ The user wants to know whether any AI agent on this machine did something it sho
 ## 1. Decide what the user wants
 
 - **"Audit the last N hours / since X"** → do a fresh review (step 2).
-- **"What did the hourly audit find?" / "anything flagged?"** → read the cron results instead: `tail -20 ~/.claude-audit/audit.log`, then open the most recent report(s) whose verdict is FLAGGED, CRITICAL, UNCLEAR or REVIEW-FAILED. Summarise those; offer to dig into any finding (step 4).
+- **"What did the hourly audit find?" / "anything flagged?"** → read the hourly job's results instead: `tail -20 ~/.claude-audit/audit.log`, then open the most recent report(s) whose verdict is FLAGGED, CRITICAL, UNCLEAR or REVIEW-FAILED. Summarise those; offer to dig into any finding (step 4).
 - No window given → default to the last 1 hour.
 - A project named → pass `--project <text>`.
 
-If the script is missing, say so and stop: the user needs to run `./setup.sh` in their `ai-dev` checkout. Do not improvise a replacement. If `audit.log` has no recent lines, the hourly job isn't running: `skills/agent-audit/install-schedule.sh` in that checkout installs it.
+If the script is missing, say so and stop: the user needs to run `./setup.sh` in their `ai-dev` checkout. Do not improvise a replacement. If `audit.log` has no recent lines, the hourly job isn't running: check `~/.claude-audit/schedule.log` for its errors; `skills/agent-audit/install-schedule.sh` in that checkout (re)installs it.
 
 ## 2. Extract the timeline
 
@@ -22,7 +22,7 @@ If the script is missing, say so and stop: the user needs to run `./setup.sh` in
 python3 ~/.claude/skills/agent-audit/claude_session_audit.py --stdout --no-llm --since 1h
 ```
 
-(Use `python` on Windows. Change `--since` to the window: `30m`, `6h`, `2d`.) `--stdout` never touches the cron state, so this doesn't interfere with the hourly job.
+(Use `python` on Windows. Change `--since` to the window: `30m`, `6h`, `2d`.) `--stdout` writes nothing to `~/.claude-audit`, so this doesn't interfere with the hourly job.
 
 The output has a list of automatic pattern hits, then a per-session timeline: `USER` prompts, `AGENT` messages, `CALL` lines (tool + input) and `->` result previews (truncated to 300 chars). Tags like `[BLOCKED]`, `[WORKAROUND-LANGUAGE]`, `[RISKY]`, `[AFTER-BLOCK]` are cheap regex hints and often false positives.
 

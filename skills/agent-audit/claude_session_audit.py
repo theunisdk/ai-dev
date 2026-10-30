@@ -20,11 +20,12 @@ Usage:
   claude_session_audit.py --since 3h         # explicit window: 30m, 3h, 2d
   claude_session_audit.py --no-llm           # just extract + pattern checks
   claude_session_audit.py --stdout --no-llm  # print the timeline (used by the skill)
-  claude_session_audit.py --on-flag "notify-send 'Claude audit' {report}"
+  claude_session_audit.py --on-flag "notify-send 'Claude audit {verdict}' {report}"
 
 Schedule it hourly with install-schedule.sh (launchd on macOS, cron elsewhere).
 
-Exit codes: 0 clean / nothing to review, 2 something flagged, 1 error.
+Exit codes: 0 clean / nothing to review, 2 something flagged, 3 the model review
+failed or was unreadable (the window is retried next run), 1 error.
 """
 import argparse
 import datetime as dt
@@ -43,6 +44,8 @@ TEXT_LIMIT = 2000      # agent / user message chars
 INPUT_LIMIT = 1500     # tool call input chars
 RESULT_LIMIT = 300     # tool result chars
 BATCH_CHARS = 350_000  # ~90k tokens per review call; bigger windows get split
+MAX_WINDOW = dt.timedelta(hours=24)  # how far back a run catches up after failures
+KEEP_REPORTS = dt.timedelta(days=30)
 
 BLOCK_RE = re.compile(
     r"permission|denied|not allowed|blocked|by (a |the )?hook|sandbox|"
@@ -72,8 +75,11 @@ def config_dir() -> Path:
 
 def state_dir() -> Path:
     d = Path(os.environ.get("CLAUDE_AUDIT_DIR") or Path.home() / ".claude-audit")
-    (d / "reports").mkdir(parents=True, exist_ok=True)
-    d.chmod(0o700)  # reports quote whatever the agents read, secrets included
+    # reports quote whatever the agents read, secrets included
+    for sub in (d, d / "reports"):
+        if not sub.exists():
+            sub.mkdir(parents=True)
+            sub.chmod(0o700)
     return d
 
 
@@ -263,9 +269,10 @@ def run_review(text, model, claude_bin):
     cmd = [exe, "-p", "--model", model, "--no-session-persistence",
            "--tools", "", "--strict-mcp-config", "--setting-sources", "",
            "--disable-slash-commands", "--max-turns", "1", "--output-format", "text"]
-    # An API key in the environment would take precedence over the subscription login.
+    # Keys, base URLs and cloud providers in the environment would take precedence
+    # over the subscription login.
     env = {k: v for k, v in os.environ.items()
-           if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+           if not k.startswith(("ANTHROPIC_", "CLAUDE_CODE_USE_", "AWS_BEARER_TOKEN_"))}
     env["CLAUDE_CODE_SKIP_PROMPT_HISTORY"] = "1"
     p = subprocess.run(cmd, input=REVIEW_PROMPT + text, capture_output=True,
                        text=True, timeout=900, env=env, cwd=str(state_dir()))
@@ -276,8 +283,29 @@ def run_review(text, model, claude_bin):
 
 
 def verdict_of(review):
-    m = re.search(r"VERDICT:\s*(CLEAN|FLAGGED|CRITICAL)", review, re.I)
+    first = next((l for l in review.splitlines() if l.strip()), "")
+    m = re.fullmatch(r"\W*VERDICT:\s*(CLEAN|FLAGGED|CRITICAL)\W*", first.strip(), re.I)
     return m.group(1).upper() if m else "UNCLEAR"
+
+
+def batch(sections):
+    """Split sections into review-sized batches; an oversized one splits at line ends."""
+    pieces = []
+    for s in sections:
+        while len(s) > BATCH_CHARS:
+            cut = s.rfind("\n", 0, BATCH_CHARS)
+            cut = cut if cut > 0 else BATCH_CHARS
+            pieces.append(s[:cut])
+            s = "(continued)" + s[cut:]
+        pieces.append(s)
+    batches, cur = [], ""
+    for s in pieces:
+        if cur and len(cur) + len(s) > BATCH_CHARS:
+            batches.append(cur)
+            cur = ""
+        cur += s + "\n"
+    batches.append(cur)
+    return batches
 
 
 # ---------------------------------------------------------------- main
@@ -291,35 +319,54 @@ def main():
     ap.add_argument("--no-llm", action="store_true", help="skip the model review")
     ap.add_argument("--stdout", action="store_true", help="print timeline instead of saving")
     ap.add_argument("--project", help="only sessions whose folder/cwd contains this text")
-    ap.add_argument("--on-flag", help="shell command to run when flagged; {report} = path")
+    ap.add_argument("--on-flag", help="shell command to run when flagged or the review "
+                    "failed; {report} = report path, {verdict} = verdict")
     args = ap.parse_args()
 
-    sd = state_dir()
-    state_file = sd / "last_run"
     now = dt.datetime.now(dt.timezone.utc)
-    use_state = not args.since and not args.stdout
+    use_state = not args.since and not args.stdout and not args.no_llm
+    notes = []
+    sd = None if args.stdout else state_dir()
+    state_file = sd / "last_run" if sd else None
     if args.since:
         cutoff = now - parse_window(args.since)
     elif use_state and state_file.exists():
-        cutoff = parse_ts(state_file.read_text().strip()) or now - dt.timedelta(hours=1)
+        cutoff = parse_ts(state_file.read_text().strip())
+        if cutoff is None:
+            cutoff = now - dt.timedelta(hours=1)
+            notes.append("last_run unreadable, reviewed the last hour only")
+        elif now - cutoff > MAX_WINDOW:
+            notes.append(f"gap: {cutoff.isoformat()} to {(now - MAX_WINDOW).isoformat()} "
+                         "never reviewed")
+            cutoff = now - MAX_WINDOW
     else:
         cutoff = now - dt.timedelta(hours=1)
 
     projects = config_dir() / "projects"
+    if not projects.is_dir() or not os.access(projects, os.R_OK | os.X_OK):
+        msg = f"cannot read transcripts at {projects}"
+        if sd:
+            with (sd / "audit.log").open("a") as fh:
+                fh.write(f"{now.isoformat()} ERROR {msg}\n")
+        print(f"ERROR: {msg}", file=sys.stderr)
+        return 1
     files = []
-    if projects.is_dir():
-        for f in projects.rglob("*.jsonl"):
-            try:
-                mtime = dt.datetime.fromtimestamp(f.stat().st_mtime, dt.timezone.utc)
-            except OSError:
-                continue
-            if mtime >= cutoff:
-                files.append(f)
-    files.sort(key=lambda f: f.stat().st_mtime)
+    for f in projects.rglob("*.jsonl"):
+        try:
+            mtime = dt.datetime.fromtimestamp(f.stat().st_mtime, dt.timezone.utc)
+        except OSError:
+            continue
+        if mtime >= cutoff:
+            files.append((mtime, f))
+    files = [f for _, f in sorted(files)]
 
     sections, all_flags = [], []
     for f in files:
-        meta, events = read_session(f, cutoff)
+        try:
+            meta, events = read_session(f, cutoff)
+        except Exception as ex:
+            notes.append(f"skipped {f}: {ex!r}")
+            continue
         if not events:
             continue
         if args.project and args.project.lower() not in (str(f) + str(meta["cwd"])).lower():
@@ -330,7 +377,8 @@ def main():
 
     local = lambda d: d.astimezone().strftime("%Y-%m-%d %H:%M")
     header = (f"# Claude Code session audit\nwindow: {local(cutoff)} → {local(now)}  |  "
-              f"sessions: {len(sections)}  |  pattern hits: {len(all_flags)}\n")
+              f"sessions: {len(sections)}  |  pattern hits: {len(all_flags)}\n"
+              + "".join(f"note: {n}\n" for n in notes))
     flag_block = "\n## Pattern hits (automatic, may be false positives)\n" + (
         "\n".join(f"- {t} {', '.join(fl)} — {sess[:8]} ({cwd or '?'}) {tool}: {snip}"
                   for sess, cwd, t, fl, tool, snip in all_flags) or "- none")
@@ -341,9 +389,16 @@ def main():
         return 0
 
     log = sd / "audit.log"
+    for old in (sd / "reports").glob("*.md"):
+        try:
+            if now.timestamp() - old.stat().st_mtime > KEEP_REPORTS.total_seconds():
+                old.unlink()
+        except OSError:
+            pass
     if not sections:
         with log.open("a") as fh:
-            fh.write(f"{now.isoformat()} no activity since {cutoff.isoformat()}\n")
+            fh.write(f"{now.isoformat()} no activity since {cutoff.isoformat()} "
+                     f"(files={len(files)})" + "".join(f"; {n}" for n in notes) + "\n")
         if use_state:
             state_file.write_text(now.isoformat())
         return 0
@@ -354,16 +409,8 @@ def main():
 
     review, verdict = "(model review skipped: --no-llm)", "UNREVIEWED"
     if not args.no_llm:
-        # split into batches so a busy window doesn't blow the context
-        batches, cur = [], ""
-        for s in sections:
-            if cur and len(cur) + len(s) > BATCH_CHARS:
-                batches.append(cur)
-                cur = ""
-            cur += s[:BATCH_CHARS] + "\n"
-        batches.append(cur)
         try:
-            reviews = [run_review(b, args.model, args.claude_bin) for b in batches]
+            reviews = [run_review(b, args.model, args.claude_bin) for b in batch(sections)]
         except Exception as ex:  # keep heuristics, retry this window next run
             review, verdict = f"Model review FAILED: {ex}", "REVIEW-FAILED"
             use_state = False
@@ -371,6 +418,8 @@ def main():
             order = ["CLEAN", "UNCLEAR", "FLAGGED", "CRITICAL"]
             verdict = max((verdict_of(r) for r in reviews), key=order.index)
             review = "\n\n---\n\n".join(reviews)
+            if verdict == "UNCLEAR":  # nothing usable came back; retry the window
+                use_state = False
 
     report.write_text(f"{header}\n**VERDICT: {verdict}**  (model: {args.model})\n\n"
                       f"## Review\n{review}\n{flag_block}\n\n"
@@ -378,17 +427,20 @@ def main():
                       encoding="utf-8")
     with log.open("a") as fh:
         fh.write(f"{now.isoformat()} {verdict} sessions={len(sections)} "
-                 f"hits={len(all_flags)} report={report}\n")
+                 f"hits={len(all_flags)} report={report}"
+                 + "".join(f"; {n}" for n in notes) + "\n")
     if use_state:
         state_file.write_text(now.isoformat())
 
-    flagged = verdict in ("FLAGGED", "CRITICAL", "UNCLEAR", "REVIEW-FAILED") or \
+    failed = verdict in ("UNCLEAR", "REVIEW-FAILED")
+    flagged = verdict in ("FLAGGED", "CRITICAL") or \
         (verdict == "UNREVIEWED" and any("BLOCKED" in x[3] or "AFTER-BLOCK" in x[3]
                                          for x in all_flags))
     print(f"{verdict}: {report}")
-    if flagged and args.on_flag:
-        subprocess.run(args.on_flag.replace("{report}", shlex.quote(str(report))), shell=True)
-    return 2 if flagged else 0
+    if (flagged or failed) and args.on_flag:
+        subprocess.run(args.on_flag.replace("{report}", shlex.quote(str(report)))
+                       .replace("{verdict}", shlex.quote(verdict)), shell=True)
+    return 3 if failed else 2 if flagged else 0
 
 
 if __name__ == "__main__":
