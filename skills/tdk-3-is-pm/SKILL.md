@@ -250,13 +250,15 @@ do, or the request was merge-only or had no deploy), sweep for leftovers first:
 
 ```bash
 tmux -L default ls; tmux -L claude-remote ls   # any <code>-… session other than this one
-git -C <repo> worktree list                    # every repo involved: nothing under .claude/worktrees/
+git -C <repo> worktree list                    # every repo involved: no task or deploy worktree of yours
 ```
 
-`<code>` is `$TDK_CODE`, else the prefix of `tmux display-message -p '#S'`. A socket with no server
-has no sessions; any other error is not a clean sweep. Each leftover goes back to its worker under
-the Step 5 rule: kill a session only after its PR is `MERGED` and its worktree is gone. Escalate a
-leftover that still holds work.
+`<session-name>` is `tmux display-message -p '#S'`, and `<code>` is `$TDK_CODE`, else that name's
+prefix; with no code, the sweep is not clean. `no server running on …` and `error connecting to …
+(No such file or directory)` mean a socket has no sessions; any other error is not a clean sweep.
+Each leftover goes back to its worker under the Step 5 rule (a deploy worker: Step 6's): kill a
+session only after its PR is `MERGED` and its worktree is gone, with `tmux -L <socket>
+kill-session -t "=<name>"` on the socket that listed it. Escalate a leftover that still holds work.
 
 Once the sweep is clean, send one notice:
 `tg-notify "✅ <session-name> done — safe to close: <one-line summary>"` (exit 0 sent, 1 failed,
@@ -276,7 +278,8 @@ State: waiting on you — <what>
 State: DONE — safe to close
 ```
 
-`DONE` appears only after Step 7's sweep comes back clean.
+`DONE` appears only after Step 7's sweep comes back clean. The line counts toward no cap, such as
+orient's five lines.
 
 ## Recovery after compaction
 
