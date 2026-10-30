@@ -42,7 +42,7 @@ fi
 ```
 On `kit`, the pre-PR review **is** the kit's `/review`; it replaces the subagent review. Otherwise the printed line is your `pre-pr-review:` line: run the subagent review from the global CLAUDE.md ("Before pushing a branch or opening a PR"), then push.
 
-**The cap, in both paths:** one full review pass, then at most one scoped re-review of the fix commits. After that, fix only Critical/High findings. Disposition every other finding: log it as an issue, or reject it with a written reason in the PR. Never start a third pass on your own. A Critical/High fix after the last pass gets only the scoped check that brings the review to HEAD (kit: item 3; otherwise one scoped subagent review of that fix). Any Critical/High still open after that goes to the user (a managed worker: its PM) as a decision, not another loop.
+**The cap, in both paths:** one full review pass, then at most one scoped re-review of the fix commits. After that, fix only Critical/High findings. Disposition every other finding: log it as an issue (labelled as Step 3's (b) says), or reject it with a written reason in the PR. Never start a third pass on your own. A Critical/High fix after the last pass gets only the scoped check that brings the review to HEAD (kit: item 3; otherwise one scoped subagent review of that fix). Any Critical/High still open after that goes to the user (a managed worker: its PM) as a decision, not another loop.
 
 In a kit repo:
 
@@ -71,7 +71,7 @@ The first head CodeRabbit reviews is the one Step 4b's postmortem scores, so its
 
 - Before `gh pr create`, decide once whether the repo has CodeRabbit (below).
 - If a PR already exists for this branch (`gh pr view --json number,url`), reuse it — don't open a duplicate.
-- Otherwise: `gh pr create --base main`. Title = the Conventional Commit summary of the work. Body = a short summary plus `Refs #<n>` for each issue the work addresses (`Refs #12, #15`). Never put `Fixes`, `Closes` or `Resolves` before an issue number.
+- Otherwise: `gh pr create --base main`. Title = the Conventional Commit summary of the work. Body = a short summary plus `Refs` for each issue the work addresses: `Refs #12, #15` in this repo, `Refs <owner/repo>#<n>` elsewhere. Never put `close`, `fix` or `resolve`, in any form or case, before an issue reference, in the body or in a commit message on the branch: the squash merge carries them to `main`.
 - Where CodeRabbit is installed, decide now whether the PR skips it (below). If it qualifies, put `@coderabbitai ignore` on its own line in the body you pass to `gh pr create`.
 - Capture the PR number; you'll pass it to the helper script throughout.
 
@@ -105,7 +105,7 @@ The `CodeRabbit:` line it prints decides the rest of this skill:
 
 There is no `@coderabbitai ignore` decision, and Step 3 doesn't run: no `wait`, no nudge, no fix rounds. Go from Step 2 to Step 4.
 
-The gate is the Step 1b review, held to the same cap, plus one scoped review of each PM send-back's fixes (below). No extra passes when CodeRabbit is absent. It must cover the head you report, with every finding dispositioned: fixed, logged as an issue (filed as Step 3's (b) says), or rejected with a written reason. A `/review` verdict names its SHA in the `pre-pr-review:` line. After a subagent review, add the SHA it reviewed to your line, e.g. `pre-pr-review: subagent — no review kit in this repo; covers <sha>`. If your PM sends work back, review every fix commit before pushing: in a kit repo, Step 1b item 3's path for a verdict SHA that is an ancestor of HEAD; elsewhere, a scoped subagent review of the fixes. Then report the line for the new head. Each send-back counts as one of the two rounds; after the second, bring what remains to the PM rather than pushing again.
+The gate is the Step 1b review, held to the same cap, plus one scoped review of each PM send-back's fixes (below). No extra passes when CodeRabbit is absent. It must cover the head you report, with every finding dispositioned: fixed, logged as an issue (labelled as Step 3's (b) says), or rejected with a written reason. A `/review` verdict names its SHA in the `pre-pr-review:` line. After a subagent review, add the SHA it reviewed to your line, e.g. `pre-pr-review: subagent — no review kit in this repo; covers <sha>`. If your PM sends work back, review every fix commit before pushing: in a kit repo, Step 1b item 3's path for a verdict SHA that is an ancestor of HEAD; elsewhere, a scoped subagent review of the fixes. Then report the line for the new head. Each send-back counts as one of the two rounds; after the second, bring what remains to the PM rather than pushing again.
 
 ### Skipping CodeRabbit
 
