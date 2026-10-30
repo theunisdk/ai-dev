@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Machine setup for this toolkit: symlink every skill in skills/ into ~/.claude/skills
-# so Claude Code discovers them, and install every mod in mods/ from this checkout's
-# marketplace (.claude-plugin/marketplace.json). Claude Code reads those mods in place
+# so Claude Code discovers them, schedule the hourly agent audit, and install every mod
+# in mods/ from this checkout's marketplace (.claude-plugin/marketplace.json). Claude
+# Code reads those mods in place
 # from the checkout, so a pull updates them. Idempotent — run it after every pull
 # that adds a skill or mod; existing correct links are just refreshed.
 #
@@ -40,6 +41,9 @@ for src in "$REPO_DIR"/skills/*/; do
 done
 
 echo "skills: $linked linked, $kept refreshed, $conflicts conflict(s)"
+
+# The agent-audit skill's hourly review; it runs through the claude CLI's own login.
+"$REPO_DIR/skills/agent-audit/install-schedule.sh" || true
 
 if command -v claude >/dev/null 2>&1; then
   for src in "$REPO_DIR"/mods/*/; do

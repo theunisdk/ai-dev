@@ -29,6 +29,7 @@ Claude Code skills, authored here and symlinked into `~/.claude/skills/`. Highli
 | `nldr-pr-docs` | PR-scoped doc updates — runs interactively or headless in CI |
 | `nldr-setup-docs-ci` | Wire `nldr-pr-docs` into a repo's GitHub Actions |
 | `check-claude-ext-backdoor` | Read-only check of a Mac, Linux, Windows or WSL box for the trojanized Claude Code IDE extension (2.1.313, Cursor marketplace, Oct 2026). Copy the folder into `~/.claude/skills/` to share it, or run `scripts/check.sh` / `scripts/check.ps1` directly |
+| `agent-audit` | Audit recent Claude Code sessions for agents working around blocks, editing their own settings, touching secrets or running destructive commands. `./setup.sh` also schedules the bundled script hourly (launchd on macOS, cron elsewhere); it reviews with Sonnet through the `claude` CLI's own login, so a Max subscription and no API key |
 | `review-kit-install` | Bootstrap + adapt the codex review kit into a repo that doesn't have it ("implement the review kit here") |
 | `tdk-1-start` | Session kickoff: load project context, confirm the starting branch |
 | `tdk-2-push-review` | Push → PR → CodeRabbit, capped at two fix rounds; every finding fixed, issue-logged, or rejected with a reason; pauses before merge |
