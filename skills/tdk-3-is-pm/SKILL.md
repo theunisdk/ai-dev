@@ -243,12 +243,40 @@ If the deploy or the check fails, escalate at once: what the target shows, the l
 recommendation — roll back, fix forward with a new worker, or what the user must supply. Don't fix
 it yourself, and don't redeploy without a fresh go.
 
-## Step 7 — Report
+## Step 7 — Close out and report
 
-At the end of the feature, one digest: what shipped and its PR links, what was deployed and the
-evidence it is live (or why it wasn't deployed), the decisions taken and who took them, and anything
-deferred or logged as an issue. Same filter as Step 4 — the digest is what happened, not a
-transcript of how.
+At the end of the feature, and on an early end (the user cancels, there turns out to be nothing to
+do, or the request was merge-only or had no deploy), sweep for leftovers first:
+
+```bash
+tmux -L default ls; tmux -L claude-remote ls   # any <code>-… session other than this one
+git -C <repo> worktree list                    # every repo involved: nothing under .claude/worktrees/
+```
+
+`<code>` is `$TDK_CODE`, else the prefix of `tmux display-message -p '#S'`. A socket with no server
+has no sessions; any other error is not a clean sweep. Each leftover goes back to its worker under
+the Step 5 rule: kill a session only after its PR is `MERGED` and its worktree is gone. Escalate a
+leftover that still holds work.
+
+Once the sweep is clean, send one notice:
+`tg-notify "✅ <session-name> done — safe to close: <one-line summary>"` (exit 0 sent, 1 failed,
+3 not configured). The final message's first line is `✅ DONE — safe to close <session-name>`, then
+one digest: what shipped and its PR links, what was deployed and the evidence it is live (or why it
+wasn't deployed), the decisions taken and who took them, and anything deferred or logged as an
+issue. If `tg-notify` did not exit 0, say the notice was not sent. Same filter as Step 4 — the digest
+is what happened, not a transcript of how.
+
+## The State line
+
+Every reply ends with exactly one line, one of:
+
+```
+State: working — <n> workers live: <names>
+State: waiting on you — <what>
+State: DONE — safe to close
+```
+
+`DONE` appears only after Step 7's sweep comes back clean.
 
 ## Recovery after compaction
 
@@ -283,3 +311,4 @@ can see in the conversation; if you can't tell whether the user gave go, ask.
 | "I'll forward this so he has the full context" | Forwarding is not filtering. Decide, then send a recommendation. |
 | "The worker disagrees with the brief — ask the user" | Read its reasoning. If it's right, re-brief. Your call. |
 | "Faster to spawn a session for this lookup" | A subagent is cheaper. Spawn for real tasks. |
+| "Everything merged, I'm done" | Not until the sweep is clean and the first line says `✅ DONE — safe to close`. |
