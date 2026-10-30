@@ -185,6 +185,9 @@ Send GO only when **all** of these hold:
 - any review object you rely on as evidence is on the head SHA. A verdict on an older commit says
   nothing about what you are about to merge. Older review objects are history and fail nothing: a
   clean incremental pass on the head leaves `Review completed` and no new review object.
+- the PR closes no issue on merge:
+  `gh pr view <n> -R <owner/repo> --json closingIssuesReferences -q '.closingIssuesReferences|length'`
+  prints `0`. Otherwise send it back to link them with `Refs`.
 - CI passed on its own terms: read the job result, not the check's conclusion. A job that is green
   because every step was skipped is not a pass.
 - the worker reported `ACTIONABLE: 0` with head state `REVIEWED`, `SKIPPED` on a PR that passed
@@ -251,6 +254,8 @@ do, or the request was merge-only or had no deploy), sweep for leftovers first:
 ```bash
 tmux -L default ls; tmux -L claude-remote ls   # any <code>-… session other than this one
 git -C <repo> worktree list                    # every repo involved: no task or deploy worktree of yours
+gh pr view <n> -R <owner/repo> --json body -q .body          # each merged PR: the issues it Refs
+gh issue view <i> -R <issue-repo> --json state -q .state     # each: the PR's repo for #i, else the named one
 ```
 
 `<session-name>` is `tmux display-message -p '#S'`, only when `$TMUX` is set, and `<code>` is
@@ -259,15 +264,19 @@ and `error connecting to … (No such file or directory)` mean a socket has no s
 error, from tmux or git, is not a clean sweep. Each leftover goes back to its worker under the
 Step 5 rule: kill a session only after its PR is `MERGED` and its worktree is gone (a deploy
 worker: once its worktree is gone, as Step 6), with `tmux -L <socket> kill-session -t "=<name>"`
-on the socket that listed it. Escalate a leftover that still holds work.
+on the socket that listed it. Escalate a leftover that still holds work. A referenced issue is not a
+leftover; it goes in the digest. A `gh` call that failed is not `no Refs`: name the PR or issue
+whose lookup failed in the digest.
 
 Once the sweep is clean, send one notice:
 `tg-notify "✅ <session-name> done — safe to close: <one-line summary>"` (exit 0 sent, 1 failed,
 3 not configured). The final message's first line is `✅ DONE — safe to close <session-name>`, then
 one digest: what shipped and its PR links, what was deployed and the evidence it is live (or why it
-wasn't deployed), the decisions taken and who took them, and anything deferred or logged as an
-issue. If `tg-notify` did not exit 0, say the notice was not sent. Same filter as Step 4 — the digest
-is what happened, not a transcript of how.
+wasn't deployed), the decisions taken and who took them, anything deferred or logged as an issue, and
+the issues each merged PR references (or `no Refs`). List the open ones as ready to close if the
+deploy is verified, or as open until it is. Name any already closed as closed before verification.
+Don't close them unless the user asks. If `tg-notify` did not exit 0, say the notice was
+not sent. Same filter as Step 4 — the digest is what happened, not a transcript of how.
 
 ## The State line
 
