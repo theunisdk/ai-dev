@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 # Read-only check for the trojanized Anthropic.claude-code 2.1.313 IDE extension
 # (Cursor extension marketplace, 2026-10-29). It changes nothing on the machine.
-# Indicators come from Cursor's notice:
+# Indicators come from Cursor's notice and, for Linux, from OpenSourceMalware:
 #   https://cursor.com/blog/claude-code-extension-security-notice
+#   https://opensourcemalware.com/blog/trojanized-claude-code-extension-plants-persistent-ssh-backdoor
 #
-#   bash check.sh
+#   bash check.sh        (as the user who runs the IDE, never with sudo)
 #
 # Exit: 0 no indicator found, 1 indicator found, 2 none found but a check could not run.
 set -u
 
 IP='134.209.82.225'
+IP_RE='134\.209\.82\.225'
 KEY_COMMENT='svc-telemetry'
 KEY_FP='SHA256:0Z6R+DF64Do2nwQic8a7kkfDLNNk4IiK+2U2Rci4htk'
 BAD_VERSION='2.1.313'
 BAD_VERSION_RE='anthropic\.claude-code[-@ ]v?2\.1\.313'
+SMT_RE='\.config/\.smtk?([^[:alnum:]_.]|$)'
+STK_RE='\.stk_[0-9a-f]{10}'
 
 found=0; skipped=0
 hit()  { echo "FOUND  $*"; found=$((found + 1)); }
@@ -21,16 +25,36 @@ ok()   { echo "clean  $*"; }
 skip() { echo "SKIP   $*"; skipped=$((skipped + 1)); }
 note() { echo "info   $*"; }
 
+# grep exits 0 on a match, 1 on none, and 2 when it could not read something.
+grep_result() {
+  local rc=$1 what=$2 clean_msg=$3 target=${4:-$3}
+  case $rc in
+    0) hit "$what" ;;
+    1) [ -n "$clean_msg" ] && ok "$clean_msg" ;;
+    *) skip "could not read all of $target" ;;
+  esac
+  return 0
+}
+
+if [ -z "${HOME:-}" ]; then
+  echo "SKIP   HOME is not set"; echo "RESULT: could not run."; exit 2
+fi
+if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
+  echo "SKIP   running under sudo checks root's home, not $SUDO_USER's. Run without sudo."
+  echo "RESULT: could not run."; exit 2
+fi
+
 os="$(uname -s)"
 wsl=0
 grep -qi microsoft /proc/version 2>/dev/null && wsl=1
 
-# In WSL the Windows profiles are scanned too, for extensions and IDE logs.
 homes=("$HOME")
 if [ "$wsl" = 1 ]; then
+  win_profiles=0
   for d in /mnt/c/Users/*/; do
-    [ -d "$d/AppData" ] && homes+=("${d%/}")
+    [ -d "$d/AppData" ] && { homes+=("${d%/}"); win_profiles=1; }
   done
+  [ "$win_profiles" = 1 ] || note "WSL: no Windows profile under /mnt/c/Users; run check.ps1 on the Windows host"
 fi
 
 echo "== IDE extensions"
@@ -43,23 +67,20 @@ for h in "${homes[@]}"; do
     for ext in "$dir"/anthropic.claude-code-*; do
       [ -d "$ext" ] || continue
       ext_seen=1
-      name="${ext#"$h"/}"
       case "$ext" in
-        *"-$BAD_VERSION"*) hit "malicious version installed: $ext" ;;
+        *"-$BAD_VERSION"*) hit "malicious version installed: $ext"; continue ;;
       esac
-      if [ ! -r "$ext" ]; then
-        skip "cannot read $ext"
-      elif grep -rqlF -e "$IP" -e "$KEY_COMMENT" "$ext" 2>/dev/null; then
-        hit "backdoor strings in $ext"
-      else
-        ok "$name"
+      if [ ! -f "$ext/extension.js" ]; then
+        skip "no extension.js in $ext"
+        continue
       fi
+      grep -qF -e "$IP" -e "$KEY_COMMENT" "$ext/extension.js" 2>/dev/null
+      grep_result $? "backdoor strings in $ext/extension.js" "$ext"
     done
     for meta in "$dir/extensions.json" "$dir/.obsolete"; do
       [ -f "$meta" ] || continue
-      if grep -qE "$BAD_VERSION_RE" "$meta" 2>/dev/null; then
-        hit "$BAD_VERSION recorded in $meta"
-      fi
+      grep -qE "$BAD_VERSION_RE" "$meta" 2>/dev/null
+      grep_result $? "$BAD_VERSION recorded in $meta" "$meta"
     done
   done
 done
@@ -68,17 +89,18 @@ done
 echo "== IDE logs (was $BAD_VERSION ever loaded?)"
 log_seen=0
 for h in "${homes[@]}"; do
+  log_dirs=()
   for app in Cursor Code "Code - Insiders" Windsurf VSCodium; do
-    for logs in "$h/Library/Application Support/$app/logs" "$h/.config/$app/logs" \
-                "$h/AppData/Roaming/$app/logs"; do
-      [ -d "$logs" ] || continue
-      log_seen=1
-      if grep -rqE "$BAD_VERSION_RE" "$logs" 2>/dev/null; then
-        hit "$BAD_VERSION appears in $logs"
-      else
-        ok "$logs"
-      fi
-    done
+    log_dirs+=("$h/Library/Application Support/$app/logs" "$h/.config/$app/logs" "$h/AppData/Roaming/$app/logs")
+  done
+  for server in .cursor-server .vscode-server .vscode-server-insiders .windsurf-server; do
+    log_dirs+=("$h/$server/data/logs")
+  done
+  for logs in "${log_dirs[@]}"; do
+    [ -d "$logs" ] || continue
+    log_seen=1
+    grep -rqE "$BAD_VERSION_RE" "$logs" 2>/dev/null
+    grep_result $? "$BAD_VERSION appears in $logs" "$logs"
   done
 done
 [ "$log_seen" = 1 ] || note "no IDE log folders found"
@@ -87,15 +109,21 @@ echo "== SSH authorized_keys"
 for f in "$HOME/.ssh/authorized_keys" "$HOME/.ssh/authorized_keys2"; do
   [ -e "$f" ] || { ok "$f absent"; continue; }
   [ -r "$f" ] || { skip "cannot read $f"; continue; }
-  before=$found
-  grep -nF "$KEY_COMMENT" "$f" >/dev/null 2>&1 && hit "key '$KEY_COMMENT' in $f"
+  before=$found; before_skip=$skipped
+  grep -qF "$KEY_COMMENT" "$f" 2>/dev/null
+  grep_result $? "key '$KEY_COMMENT' in $f" "" "$f"
   # The comment can be edited away; the fingerprint cannot.
   if command -v ssh-keygen >/dev/null 2>&1; then
-    ssh-keygen -lf "$f" 2>/dev/null | grep -qF "$KEY_FP" && hit "attacker key fingerprint in $f"
+    fps="$(ssh-keygen -lf "$f" 2>/dev/null)"; rc=$?
+    if printf '%s\n' "$fps" | grep -qF "$KEY_FP"; then
+      hit "attacker key fingerprint in $f"
+    elif [ "$rc" != 0 ] && grep -qvE '^[[:space:]]*(#|$)' "$f" 2>/dev/null; then
+      skip "ssh-keygen could not read the keys in $f"
+    fi
   else
     skip "ssh-keygen missing, fingerprint not checked in $f"
   fi
-  [ "$found" = "$before" ] && ok "$f"
+  [ "$found" = "$before" ] && [ "$skipped" = "$before_skip" ] && ok "$f"
 done
 
 echo "== Dropped files"
@@ -103,33 +131,46 @@ for f in "$HOME/.config/.smt" "$HOME/.config/.smtk" "$HOME/.config/smt.cmd" "$HO
          "$HOME/Library/LaunchAgents/com.apple.sysmond.plist"; do
   if [ -e "$f" ]; then hit "$f"; else ok "$f absent"; fi
 done
-stk_seen=0
-for t in "${TMPDIR:-/tmp}" /tmp; do
-  for f in "${t%/}"/.stk_*; do
+tmp_dirs=("${TMPDIR:-/tmp}" /tmp)
+[ "$os" = Darwin ] && tmp_dirs+=("$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null)")
+stk_seen=0; scanned=" "
+for t in "${tmp_dirs[@]}"; do
+  [ -n "$t" ] || continue
+  t="${t%/}"
+  case "$scanned" in *" $t "*) continue ;; esac
+  scanned="$scanned$t "
+  for f in "$t"/.stk_*; do
     [ -e "$f" ] && { hit "$f"; stk_seen=1; }
   done
 done
-[ "$stk_seen" = 1 ] || ok "no .stk_* files in temp"
+[ "$stk_seen" = 1 ] || ok "no .stk_* files in$scanned"
 
 echo "== Persistence"
 if [ "$os" = Darwin ]; then
-  agents="$HOME/Library/LaunchAgents"
-  if [ -d "$agents" ]; then
-    renamed="$(grep -lF -e ".config/.smt" -e "$IP" "$agents"/*.plist 2>/dev/null)"
-    if [ -n "$renamed" ]; then hit "LaunchAgent runs the backdoor: $renamed"; else ok "LaunchAgents"; fi
+  plists=("$HOME/Library/LaunchAgents"/*.plist)
+  if [ -e "${plists[0]}" ]; then
+    grep -qE -e "$SMT_RE" -e "$IP_RE" "${plists[@]}" 2>/dev/null
+    grep_result $? "a LaunchAgent runs the backdoor: $(grep -lE -e "$SMT_RE" -e "$IP_RE" "${plists[@]}" 2>/dev/null | tr '\n' ' ')" "LaunchAgents"
+  else
+    ok "no LaunchAgents"
   fi
   # Apple's real sysmond is a system daemon; only a per-user agent of that name is the backdoor.
-  if launchctl print "gui/$(id -u)/com.apple.sysmond" >/dev/null 2>&1; then
-    hit "user LaunchAgent com.apple.sysmond is loaded"
-  else
-    ok "no user LaunchAgent com.apple.sysmond loaded"
-  fi
+  launchctl print "gui/$(id -u)/com.apple.sysmond" >/dev/null 2>&1
+  case $? in
+    0) hit "user LaunchAgent com.apple.sysmond is loaded" ;;
+    113) ok "no user LaunchAgent com.apple.sysmond loaded" ;;
+    *) skip "launchctl could not query the gui/$(id -u) domain (no GUI session?)" ;;
+  esac
 fi
 if command -v crontab >/dev/null 2>&1; then
-  if crontab -l 2>/dev/null | grep -qF -e ".config/.smt" -e "$IP"; then
-    hit "crontab entry runs the backdoor"
+  cron="$(crontab -l 2>&1)"; rc=$?
+  if [ "$rc" = 0 ]; then
+    printf '%s\n' "$cron" | grep -qE -e "$SMT_RE" -e "$IP_RE"
+    grep_result $? "crontab entry runs the backdoor" "crontab"
+  elif printf '%s\n' "$cron" | grep -qi "no crontab"; then
+    ok "no crontab"
   else
-    ok "crontab"
+    skip "crontab -l failed: $(printf '%s\n' "$cron" | head -1)"
   fi
 else
   note "crontab command missing"
@@ -140,15 +181,23 @@ procs="$(ps ax -o pid= -o args= 2>/dev/null)"
 if [ -z "$procs" ]; then
   skip "could not list processes"
 else
-  bad="$(printf '%s\n' "$procs" | grep -F -e "$IP" -e ".config/.smt" -e ".stk_")"
+  bad="$(printf '%s\n' "$procs" | awk -v me=$$ -v parent="$PPID" '$1 != me && $1 != parent' |
+    grep -E -e "$SMT_RE" -e "$STK_RE" -e "ssh.*$IP_RE")"
   if [ -n "$bad" ]; then hit "backdoor process: $bad"; else ok "no backdoor process"; fi
 fi
 if command -v lsof >/dev/null 2>&1; then
-  conns="$(lsof -nP -i "@$IP" 2>/dev/null)"
-  if [ -n "$conns" ]; then hit "open connection to $IP: $conns"; else ok "no connection to $IP"; fi
+  conns="$(lsof -nP -i "@$IP" 2>&1)"; rc=$?
+  if [ "$rc" = 0 ] && [ -n "$conns" ]; then hit "open connection to $IP: $conns"
+  elif [ "$rc" = 1 ] && [ -z "$conns" ]; then ok "no connection to $IP"
+  else skip "lsof failed: $(printf '%s\n' "$conns" | head -1)"; fi
 elif command -v ss >/dev/null 2>&1; then
-  conns="$(ss -tn 2>/dev/null | grep -F "$IP")"
-  if [ -n "$conns" ]; then hit "open connection to $IP: $conns"; else ok "no connection to $IP"; fi
+  conns="$(ss -tn 2>&1)"; rc=$?
+  if [ "$rc" != 0 ]; then
+    skip "ss failed: $(printf '%s\n' "$conns" | head -1)"
+  else
+    printf '%s\n' "$conns" | grep -qF "$IP"
+    grep_result $? "open connection to $IP" "no connection to $IP"
+  fi
 else
   skip "neither lsof nor ss available, connections not checked"
 fi
