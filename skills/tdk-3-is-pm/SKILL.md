@@ -251,6 +251,8 @@ do, or the request was merge-only or had no deploy), sweep for leftovers first:
 ```bash
 tmux -L default ls; tmux -L claude-remote ls   # any <code>-… session other than this one
 git -C <repo> worktree list                    # every repo involved: no task or deploy worktree of yours
+gh pr view <n> -R <owner/repo> --json body -q .body          # each merged PR: the issues it Refs
+gh issue view <i> -R <owner/repo> --json state -q .state     # each of those: OPEN goes in the digest
 ```
 
 `<session-name>` is `tmux display-message -p '#S'`, only when `$TMUX` is set, and `<code>` is
@@ -259,15 +261,18 @@ and `error connecting to … (No such file or directory)` mean a socket has no s
 error, from tmux or git, is not a clean sweep. Each leftover goes back to its worker under the
 Step 5 rule: kill a session only after its PR is `MERGED` and its worktree is gone (a deploy
 worker: once its worktree is gone, as Step 6), with `tmux -L <socket> kill-session -t "=<name>"`
-on the socket that listed it. Escalate a leftover that still holds work.
+on the socket that listed it. Escalate a leftover that still holds work. An open referenced issue is
+not a leftover; it goes in the digest. A `gh` call that failed is not "none open": name the PR or
+issue whose lookup failed in the digest.
 
 Once the sweep is clean, send one notice:
 `tg-notify "✅ <session-name> done — safe to close: <one-line summary>"` (exit 0 sent, 1 failed,
 3 not configured). The final message's first line is `✅ DONE — safe to close <session-name>`, then
 one digest: what shipped and its PR links, what was deployed and the evidence it is live (or why it
-wasn't deployed), the decisions taken and who took them, and anything deferred or logged as an
-issue. If `tg-notify` did not exit 0, say the notice was not sent. Same filter as Step 4 — the digest
-is what happened, not a transcript of how.
+wasn't deployed), the decisions taken and who took them, anything deferred or logged as an issue, and
+the still-open issues the merged PRs reference (or `none open`), as ready to close once the deploy
+is verified. Don't close them unless the user asks. If `tg-notify` did not exit 0, say the notice was
+not sent. Same filter as Step 4 — the digest is what happened, not a transcript of how.
 
 ## The State line
 
