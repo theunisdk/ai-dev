@@ -28,6 +28,7 @@ Claude Code skills, authored here and symlinked into `~/.claude/skills/`. Highli
 | `nldr-update-docs` | Sync existing docs with the codebase (gap analysis first; works for light and full doc sets) |
 | `nldr-pr-docs` | PR-scoped doc updates — runs interactively or headless in CI |
 | `nldr-setup-docs-ci` | Wire `nldr-pr-docs` into a repo's GitHub Actions |
+| `check-claude-ext-backdoor` | Read-only check of a Mac, Linux, Windows or WSL box for the trojanized Claude Code IDE extension (2.1.313, Cursor marketplace, Oct 2026). Copy the folder into `~/.claude/skills/` to share it, or run `scripts/check.sh` / `scripts/check.ps1` directly |
 | `review-kit-install` | Bootstrap + adapt the codex review kit into a repo that doesn't have it ("implement the review kit here") |
 | `tdk-1-start` | Session kickoff: load project context, confirm the starting branch |
 | `tdk-2-push-review` | Push → PR → CodeRabbit, capped at two fix rounds; every finding fixed, issue-logged, or rejected with a reason; pauses before merge |
