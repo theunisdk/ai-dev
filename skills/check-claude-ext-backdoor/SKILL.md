@@ -23,7 +23,7 @@ The scripts are in this skill's base directory. Use the full path, because your 
 | Windows | `powershell -ExecutionPolicy Bypass -File "<skill base dir>\scripts\check.ps1"` |
 
 - Run `check.sh` as the user who runs the IDE, never with `sudo`. Under `sudo` it refuses and exits 2.
-- Run `check.ps1` in an elevated PowerShell, because SYSTEM tasks and processes are hidden otherwise. When the admin account is not the IDE user's, add `-UserProfile C:\Users\<name>`.
+- Run `check.ps1` in an elevated PowerShell, because SYSTEM tasks and processes are hidden otherwise. When the admin account is not the IDE user's, add `-UserProfile C:\Users\<name>`. That assumes the default `AppData` locations, so a redirected `AppData` or `TEMP` needs a run from the user's own account.
 - Under WSL, run both scripts: `check.sh` inside WSL and `check.ps1` on the Windows host.
 
 ## Read the result

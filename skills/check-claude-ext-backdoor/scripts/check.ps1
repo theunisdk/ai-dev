@@ -18,8 +18,13 @@ $KeyFp = 'SHA256:0Z6R+DF64Do2nwQic8a7kkfDLNNk4IiK+2U2Rci4htk'
 $BadVersion = '2.1.313'
 $BadVersionRe = 'anthropic\.claude-code[-@ ]v?2\.1\.313'
 $PayloadRe = '[\\/]\.config[\\/]\.?smtk?\b|sysmon\.cmd|\.stk_[0-9a-f]{10}'
-$AppData = Join-Path $UserProfile 'AppData\Roaming'
-$TempDir = Join-Path $UserProfile 'AppData\Local\Temp'
+if ($UserProfile -eq $env:USERPROFILE) {
+    $AppData = $env:APPDATA
+    $TempDir = $env:TEMP
+} else {
+    $AppData = Join-Path $UserProfile 'AppData\Roaming'
+    $TempDir = Join-Path $UserProfile 'AppData\Local\Temp'
+}
 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 
