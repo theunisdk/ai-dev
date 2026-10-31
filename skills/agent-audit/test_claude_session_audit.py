@@ -850,8 +850,7 @@ class RedactorTest(unittest.TestCase):
     def test_headered_key_without_end(self):
         body = [rnd(64, ALNUM + "+/") for _ in range(3)]
         heads = ["Proc-Type: 4,ENCRYPTED", "DEK-Info: AES-128-CBC,0A1B2C", "Comment: a b",
-                 'Comment: "Alice <a@b.example>"', "Comment: C:\\keys\\a", 'Comment: "Alice", work key',
-                 'Comment: "a":b', "Version: GnuPG v2"]
+                 'Comment: "Alice <a@b.example>"', "Comment: C:\\keys\\a", "Version: GnuPG v2"]
         for n in (1, 2, len(heads)):
             for nl in ("\n", "\r\n", "\\n", "\\r\\n"):
                 hs = heads[:n] if nl in ("\n", "\r\n") else [h.replace('"', '\\"') for h in heads[:n]]

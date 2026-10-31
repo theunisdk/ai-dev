@@ -144,7 +144,7 @@ def _dict_secret_name(name):
     keystrokes, issue keys and object paths, so those values rely on the format rules."""
     parts = [p for p in re.split(r"[_.\-]", name.upper()) if p]
     return _secret_name(name) and (
-        re.search(r"PASSWORD|PASSWD|SECRET|TOKEN|APIKEY|ACCESSKEY", "".join(parts)) is not None
+        re.search(r"PASSWORD|PASSWD|SECRET|TOKEN|APIKEY", "".join(parts)) is not None
         or parts[-1] in ("PASS", "PWD"))
 
 
@@ -159,11 +159,10 @@ def _config_check(m):
 
 
 # One header line (Proc-Type: …, Comment: …), raw or JSON-escaped. Its value never
-# crosses an unescaped JSON string end or a BEGIN line. (?=(?P<x>…))(?P=x) is an
-# atomic group: no backtracking, so a chain of BEGIN lines stays linear.
+# crosses an unescaped JSON string end. (?=(?P<x>…))(?P=x) is an atomic group: no
+# backtracking, so a chain of BEGIN lines stays linear.
 _PEM_HEADER = (r"(?:(?:\r?\n|(?:\\r)?\\n)[ \t]*[A-Za-z][A-Za-z\-]*:[ \t]"
-               r"(?=(?P<hv>(?:[^\r\n\\\"-]+|-(?!----)|\\[^nr\r\n]"
-               r"|\"(?![ \t]*(?:[,:][ \t]*(?:[\"\[{\d\-]|true|false|null)|[}\]])))*))(?P=hv)"
+               r"(?=(?P<hv>(?:[^\r\n\\\"]+|\\[^nr\r\n]|\"(?![ \t]*[,:}\]]))*))(?P=hv)"
                r"(?=\r?\n|(?:\\r)?\\n))")
 
 
@@ -393,16 +392,12 @@ def allowlisted(cwd, globs):
     return bool(cwd) and any(fnmatch.fnmatchcase(cwd, g) for g in globs)
 
 
-def _write_private(path, data, replace=True):
-    """Write a 0600 file whole or not at all. replace=False never overwrites."""
+def _write_private(path, data):
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
-        if replace:
-            os.replace(tmp, path)
-        else:
-            os.link(tmp, path)
+        os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
@@ -472,8 +467,10 @@ class AlertMemory:
         self.seen.update({d: self.now.isoformat() for d in digests})
         f = self.key_file
         try:
-            if self.new_key:  # a key another run just wrote is not overwritten
-                _write_private(f, (self.key.hex() + "\n").encode(), replace=False)
+            if self.new_key:  # O_EXCL: a key another run just wrote is not overwritten
+                fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(self.key.hex() + "\n")
                 self.new_key = False
             f = self.state_file
             _write_private(f, json.dumps(self.seen, sort_keys=True).encode())
