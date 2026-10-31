@@ -21,6 +21,10 @@ Nothing the script writes, prints or sends carries a recognised secret. Before a
 of that it scans its own output once more; a hit there means the redaction missed
 something, so it writes nothing, alerts, and exits 3.
 
+Alerts stay rare: secrets found in sessions whose cwd matches a glob in
+~/.claude-audit/allow are reported but don't flag or alert, and a secret alerts at
+most once a day (remembered as an HMAC under a per-machine key, never the value).
+
 Usage:
   claude_session_audit.py                    # since last run (first run: last hour)
   claude_session_audit.py --since 3h         # explicit window: 30m, 3h, 2d
@@ -37,9 +41,13 @@ written), 1 error. 3 wins over 2: the report and the alert carry the verdict.
 """
 import argparse
 import datetime as dt
+import fnmatch
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import socket
@@ -56,6 +64,7 @@ RESULT_LIMIT = 300     # tool result chars
 BATCH_CHARS = 350_000  # ~90k tokens per review call; bigger windows get split
 MAX_WINDOW = dt.timedelta(hours=24)  # how far back a run catches up after failures
 KEEP_REPORTS = dt.timedelta(days=30)
+REALERT_AFTER = dt.timedelta(hours=24)  # one alert per secret per day
 
 BLOCK_RE = re.compile(
     r"permission|denied|not allowed|blocked|by (a |the )?hook|sandbox|"
@@ -89,15 +98,26 @@ _NAME_SUFFIXES = ("PASSWORD", "PASSWD", "SECRET", "SECRETS", "TOKEN", "TOKENS", 
 _NAME_EXACT = {"KEY", "KEYS", "PASS", "PWD"}
 _NAME_QUALIFIERS = re.compile(r"BASE|LIVE|TEST|PROD|PRODUCTION|DEV|STAGING|STAGE|RO|RW|"
                               r"OLD|NEW|PRIMARY|SECONDARY|V\d+|\d+")
+# NextToken, pageToken, nextSyncToken, NEXT_CONTINUATION_TOKEN: pagination, not credentials
+_PAGINATION_TOKEN = re.compile(r"NEXT(?:PAGE|CONTINUATION|SYNC)?TOKEN|(?:PAGE|CONTINUATION|SYNC)TOKEN")
 _NOT_SECRET_KEY = {"PUBLIC", "CACHE", "SORT", "PRIMARY", "FOREIGN", "PARTITION", "CONFIG",
                    "ROUTING", "SHARD", "IDEMPOTENCY", "LOOKUP", "MAP", "HASH", "INDEX"}
+
+
+def _slash_secret(v):
+    """A value starting with "/" is a path unless it is shaped like a base64 key
+    (about 1 in 64 AWS secret keys starts with "/")."""
+    return (len(v) >= 30 and re.fullmatch(r"[A-Za-z0-9+/=]+", v) is not None
+            and any(c.isupper() for c in v) and any(c.islower() for c in v)
+            and any(c.isdigit() for c in v) and max(map(len, v.split("/"))) >= 16)
 
 
 def _real_value(v, min_len):
     low = v.lower()
     return (len(v) >= min_len and low not in _DUMMY_VALUES
             and not v[0].isspace() and "…[+" not in v
-            and not v.startswith(("$", "<", "{", "%", "/", "~", "./", "[REDACTED:"))
+            and not v.startswith(("$", "<", "{", "%", "~", "./", "[REDACTED:"))
+            and (v[0] != "/" or _slash_secret(v))
             and "xxxx" not in low and "****" not in low and len(set(v)) > 2)
 
 
@@ -111,11 +131,20 @@ def _secret_name(name):
     if not parts:
         return False
     last = parts[-1]
-    if last.endswith("TOKEN") and re.search(r"PAGE|NEXT|CONTINUATION|CURSOR|SYNC", "".join(parts)):
+    if any(_PAGINATION_TOKEN.fullmatch("".join(parts[i:])) for i in range(len(parts))):
         return False
     if last in _NAME_EXACT:
         return last not in ("KEY", "KEYS") or len(parts) == 1 or parts[-2] not in _NOT_SECRET_KEY
     return last.endswith(_NAME_SUFFIXES)
+
+
+def _dict_secret_name(name):
+    """Stricter than _secret_name: bare key / *_key names in tool inputs are mostly
+    keystrokes, issue keys and object paths, so those values rely on the format rules."""
+    parts = [p for p in re.split(r"[_.\-]", name.upper()) if p]
+    return _secret_name(name) and (
+        re.search(r"PASSWORD|PASSWD|SECRET|TOKEN|APIKEY", "".join(parts)) is not None
+        or parts[-1] in ("PASS", "PWD"))
 
 
 def _env_check(m):
@@ -128,13 +157,21 @@ def _config_check(m):
             and any(c.isdigit() for c in v) and any(c.isalpha() for c in v))
 
 
+# One header line (Proc-Type: …, Comment: …), raw or JSON-escaped. Its value never
+# crosses an unescaped JSON string end. (?=(?P<x>…))(?P=x) is an atomic group: no
+# backtracking, so a chain of BEGIN lines stays linear.
+_PEM_HEADER = (r"(?:(?:\r?\n|(?:\\r)?\\n)[ \t]*[A-Za-z][A-Za-z\-]*:[ \t]"
+               r"(?=(?P<hv>(?:[^\r\n\\\"]+|\\[^nr\r\n]|\"(?![ \t]*[,:}\]]))*))(?P=hv)"
+               r"(?=\r?\n|(?:\\r)?\\n))")
+
+
 SECRET_RULES = [
     # Headers (Proc-Type: …) may precede the body; a body cut off before its END
-    # line is still a key.
+    # line is still a key. A header value never crosses an unescaped JSON string end.
     ("private-key", re.compile(
         r"-----BEGIN (?P<t>[A-Z0-9 ]*)PRIVATE KEY(?: BLOCK)?-----"
-        r"(?:(?:(?:\r?\n|(?:\\r)?\\n)[ \t]*[A-Za-z][A-Za-z\-]*:[ \t][^\r\n\\]*(?=\r?\n|(?:\\r)?\\n)){0,4}"
-        r"(?:[A-Za-z0-9+/=\"',]|\s|\\[nr])*?-----END (?P=t)PRIVATE KEY(?: BLOCK)?-----"
+        r"(?=(?P<hd>" + _PEM_HEADER + r"{0,16}))(?P=hd)"
+        r"(?:(?:[A-Za-z0-9+/=\"',]|\s|\\[nr])*?-----END (?P=t)PRIVATE KEY(?: BLOCK)?-----"
         r"|(?:(?:\s|\\[nr]|[\"',])+[A-Za-z0-9+/=]{16,})+)"), None),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),
      None),
@@ -192,13 +229,18 @@ class Redactor:
     def __init__(self):
         self._ids = {}
         self._counts = {}
+        self._values = {}
 
     def _placeholder(self, kind, value):
         key = (kind, value)
         if key not in self._ids:
             self._counts[kind] = self._counts.get(kind, 0) + 1
             self._ids[key] = f"[REDACTED:{kind}#{self._counts[kind]}]"
+            self._values[self._ids[key]] = value
         return self._ids[key]
+
+    def value_of(self, placeholder):
+        return self._values[placeholder]
 
     def redact(self, text):
         """Return (redacted text, [(type, placeholder), ...] in order of appearance)."""
@@ -237,7 +279,7 @@ class Redactor:
         looks like."""
         if isinstance(value, str):
             out, h = self.redact(value)
-            if not h and isinstance(key, str) and _secret_name(key) and _real_value(value, 8):
+            if not h and isinstance(key, str) and _dict_secret_name(key) and _real_value(value, 8):
                 out = self._placeholder("config-secret", value)
                 h = [("config-secret", out)]
             hits += h
@@ -265,8 +307,12 @@ def config_dir() -> Path:
     return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 
 
+def audit_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_AUDIT_DIR") or Path.home() / ".claude-audit")
+
+
 def state_dir() -> Path:
-    d = Path(os.environ.get("CLAUDE_AUDIT_DIR") or Path.home() / ".claude-audit")
+    d = audit_dir()
     for sub in (d, d / "reports"):
         if not sub.exists():
             sub.mkdir(parents=True)
@@ -315,6 +361,109 @@ def result_text(content):
                     parts.append("[image]")
         return " ".join(parts)
     return "" if content is None else str(content)
+
+
+# ---------------------------------------------------------------- alert volume
+def load_allowlist(d, notes):
+    """cwd globs from <audit dir>/allow, one per line, # for comments. No file means
+    no allowlist; a file that can't be read is noted and ignored."""
+    f = d / "allow"
+    try:
+        text = f.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError) as ex:
+        notes.append(f"allowlist {f} unreadable ({type(ex).__name__}), ignored")
+        return []
+    return [os.path.expanduser(l.strip()) for l in text.splitlines()
+            if l.strip() and not l.strip().startswith("#")]
+
+
+def allowlisted(cwd, globs):
+    return bool(cwd) and any(fnmatch.fnmatchcase(cwd, g) for g in globs)
+
+
+def _write_private(path, data):
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        os.fchmod(fh.fileno(), 0o600)
+        fh.write(data)
+    os.replace(tmp, path)
+
+
+class AlertMemory:
+    """Which secrets alerted in the last day, as HMAC-SHA256 digests under a random
+    per-machine key; never the value. If the key or the history can't be read, every
+    secret counts as new: the run alerts rather than stays quiet."""
+
+    def __init__(self, d, now, notes):
+        self.key_file, self.state_file, self.now = d / "alert.key", d / "alerted.json", now
+        self.key, self.new_key, self.seen = None, False, {}
+        try:
+            self.key = self._load_key()
+        except FileNotFoundError:  # first run: the key is written with the first alert
+            self.key, self.new_key = secrets.token_bytes(32), True
+        except (OSError, ValueError) as ex:
+            notes.append(f"alert dedupe off: {self.key_file.name} unreadable "
+                         f"({type(ex).__name__}), so every secret alerts")
+            return
+        try:
+            self.seen = {} if self.new_key else self._load_state()
+        except (OSError, ValueError) as ex:
+            notes.append(f"alert history unreadable: {self.state_file.name} "
+                         f"({type(ex).__name__}), so every secret alerts")
+
+    def _load_key(self):
+        with self.key_file.open() as fh:
+            if os.fstat(fh.fileno()).st_mode & 0o077:
+                os.fchmod(fh.fileno(), 0o600)
+            key = bytes.fromhex(fh.read().strip())
+        if len(key) != 32:
+            raise ValueError("key is not 32 bytes")
+        return key
+
+    def _load_state(self):
+        try:
+            raw = self.state_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+        seen = {}
+        for digest, when in data.items():
+            t = parse_ts(when) if isinstance(when, str) else None
+            if not re.fullmatch(r"[0-9a-f]{64}", digest) or t is None:
+                raise ValueError("bad entry")
+            if self.now - t < REALERT_AFTER:
+                seen[digest] = when
+        return seen
+
+    def digest(self, value):
+        if self.key is None:
+            return None
+        return hmac.new(self.key, value.encode("utf-8", "surrogatepass"), hashlib.sha256).hexdigest()
+
+    def alerted_recently(self, digest):
+        return digest is not None and digest in self.seen
+
+    def remember(self, digests):
+        """Record digests as alerted now; return an error text, or None."""
+        digests = [d for d in digests if d is not None]
+        if not digests:
+            return None
+        self.seen.update({d: self.now.isoformat() for d in digests})
+        try:
+            if self.new_key:  # O_EXCL: a key another run just wrote is not overwritten
+                fd = os.open(self.key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(self.key.hex() + "\n")
+                self.new_key = False
+            _write_private(self.state_file, json.dumps(self.seen, sort_keys=True).encode())
+        except OSError as ex:
+            return f"could not write {self.state_file.name} ({type(ex).__name__})"
+        return None
 
 
 # ---------------------------------------------------------------- extraction
@@ -592,7 +741,8 @@ def main():
     ap.add_argument("--stdout", action="store_true", help="print timeline instead of saving")
     ap.add_argument("--project", help="only sessions whose folder/cwd contains this text")
     ap.add_argument("--on-flag", action="append", default=[],
-                    help="shell command to run when flagged, the review is incomplete, the "
+                    help="shell command to run when the model flags something, a secret not "
+                    "alerted in the last day is exposed, the review is incomplete, the "
                     "self-check failed or the run errored; repeatable. {alert} = one-line "
                     "alert (verdict, finding counts, host, report path), {report} = report "
                     "path, {verdict} = verdict")
@@ -674,15 +824,34 @@ def run(args, red, host):
         exposed += [dict(x, session=meta["session"], cwd=meta["cwd"]) for x in meta["exposed"]]
         sections.append(render(meta, events))
 
+    globs = load_allowlist(audit_dir(), notes)
+    for x in exposed:
+        x["allowlisted"] = allowlisted(x["cwd"], globs)
+    live = [x for x in exposed if not x["allowlisted"]]
+    spared = [x for x in exposed if x["allowlisted"]]
+    memory = AlertMemory(sd, now, notes) if sd and live else None
+    fresh = set()  # digests of the secrets this run alerts on (None: dedupe is off)
+    for x in live:
+        d = memory.digest(red.value_of(x["placeholder"])) if memory else None
+        x["repeat"] = memory is not None and memory.alerted_recently(d)
+        if not x["repeat"]:
+            fresh.add(d)
+    repeats = sum(x["repeat"] for x in live)
+
     local = lambda d: d.astimezone().strftime("%Y-%m-%d %H:%M")
     header = (f"# Claude Code session audit\nwindow: {local(cutoff)} → {local(now)}  |  "
               f"sessions: {len(sections)}  |  pattern hits: {len(all_flags)}  |  "
-              f"secrets exposed: {len(exposed)}\n"
-              + "".join(f"note: {n}\n" for n in notes))
+              f"secrets exposed: {len(live)}"
+              + (f" (+{len(spared)} allowlisted)" if spared else "") + "\n"
+              + "".join(f"note: {red.clean(n)}\n" for n in notes))
+    entry = lambda x: (f"- SECRET-EXPOSED {x['t']} {x['session'][:8]} ({x['cwd'] or '?'}) "
+                       f"{x['type']} in {x['where']}: {x['placeholder']}"
+                       + (" (repeat: already alerted in the last 24h)" if x.get("repeat") else ""))
     secret_block = "\n## Secrets exposed (deterministic; any one flags the run)\n" + (
-        "\n".join(f"- SECRET-EXPOSED {x['t']} {x['session'][:8]} ({x['cwd'] or '?'}) "
-                  f"{x['type']} in {x['where']}: {x['placeholder']}" for x in exposed)
-        or "- none")
+        "\n".join(entry(x) for x in live) or "- none")
+    if spared:
+        secret_block += ("\n\n## Secrets exposed in allowlisted sessions (reported only: "
+                         "they don't flag the run or alert)\n" + "\n".join(entry(x) for x in spared))
     flag_block = "\n## Pattern hits (automatic, may be false positives)\n" + (
         "\n".join(f"- {t} {', '.join(fl)} — {sess[:8]} ({cwd or '?'}) {tool}: {snip}"
                   for sess, cwd, t, fl, tool, snip in all_flags) or "- none")
@@ -698,7 +867,7 @@ def run(args, red, host):
     log = sd / "audit.log"
     if not sections and not problems:
         line = (f"{now.isoformat()} no activity since {cutoff.isoformat()} "
-                f"(files={len(files)})" + "".join(f"; {n}" for n in notes) + "\n")
+                f"(files={len(files)})" + "".join(f"; {red.clean(n)}" for n in notes) + "\n")
         guard("audit.log", line)
         prune_reports(sd, now)
         with log.open("a") as fh:
@@ -741,12 +910,20 @@ def run(args, red, host):
         review = "(nothing to review)"
     if problems:  # a window with a gap in its review is retried next run
         use_state = False
-    if exposed:
+    flagged = verdict in ("FLAGGED", "CRITICAL") or \
+        (verdict == "UNREVIEWED" and any("BLOCKED" in x[3] or "AFTER-BLOCK" in x[3]
+                                         for x in all_flags))
+    # A repeat still flags the report, but only the model, a new secret or a gap alerts.
+    should_alert = flagged or bool(fresh) or bool(problems)
+    if live:
         verdict = max(verdict, "FLAGGED", key=RANK.index)
+        flagged = True
 
     alert_counts = {}
-    if exposed:
-        alert_counts["SECRET-EXPOSED"] = len(exposed)
+    if live:
+        alert_counts["SECRET-EXPOSED"] = len(live)
+    if repeats:
+        alert_counts["REPEAT"] = repeats
     for sev in SEVERITIES + ("OTHER",):
         if counts.get(sev):
             alert_counts[sev] = counts[sev]
@@ -765,9 +942,10 @@ def run(args, red, host):
                   f"## Review\n{review}\n{flag_block}\n\n"
                   f"Full timeline: {timeline_file}\n")
     log_line = (f"{now.isoformat()} {verdict} sessions={len(sections)} "
-                f"hits={len(all_flags)} secrets={len(exposed)} "
-                f"problems={len(problems)} report={report}"
-                + "".join(f"; {n}" for n in notes)
+                f"hits={len(all_flags)} secrets={len(live)} repeats={repeats} "
+                f"allowlisted={len(spared)} problems={len(problems)} "
+                f"alert={'yes' if should_alert else 'no'} report={report}"
+                + "".join(f"; {red.clean(n)}" for n in notes)
                 + ("; last_run not advanced" if problems else "") + "\n")
     stdout_line = f"{verdict}: {report}"
     alert = (f"Claude audit on {host}: {verdict}" + (f" ({count_text})" if count_text else "")
@@ -786,17 +964,18 @@ def run(args, red, host):
     if use_state:
         state_file.write_text(now.isoformat())
 
-    flagged = verdict in ("FLAGGED", "CRITICAL") or \
-        (verdict == "UNREVIEWED" and any("BLOCKED" in x[3] or "AFTER-BLOCK" in x[3]
-                                         for x in all_flags))
     print(stdout_line)
-    if flagged or problems:
+    if should_alert:
         alert_problems = fire_alerts(args.on_flag, {"alert": alert, "report": str(report),
                                                     "verdict": verdict})
-        if alert_problems:
+        later = [f"ALERT-FAILED {p}" for p in alert_problems]
+        if args.on_flag and not alert_problems and memory:  # remember only a delivered alert
+            err = memory.remember(fresh)
+            if err:
+                later.append(f"DEDUPE-FAILED {err}; these secrets alert again next run")
+        if later:
             with log.open("a") as fh:
-                fh.write("".join(f"{now.isoformat()} ALERT-FAILED {p} report={report}\n"
-                                 for p in alert_problems))
+                fh.write("".join(f"{now.isoformat()} {l} report={report}\n" for l in later))
     return 3 if problems else 2 if flagged else 0
 
 

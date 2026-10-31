@@ -179,11 +179,14 @@ class Fixture:
     def files(self):
         if not self.audit.exists():
             return {}
-        return {str(p.relative_to(self.audit)): p.read_text()
+        return {str(p.relative_to(self.audit)): self.read(p)
                 for p in self.audit.rglob("*") if p.is_file()}
 
     def read(self, p):
-        return p.read_text() if p.exists() else ""
+        try:
+            return p.read_text() if p.exists() else ""
+        except PermissionError:
+            return "(unreadable)"
 
     def everything(self, proc):
         return "\n".join([*self.files().values(), proc.stdout, proc.stderr,
@@ -459,6 +462,186 @@ class BatchTest(unittest.TestCase):
         self.both_orders("UNCLEARME", check)
 
 
+class AlertVolumeTest(unittest.TestCase):
+    """Issue #29: an allowlist for fixture sessions, and one alert per secret per day."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(self.tmp.name)
+        self.fx.audit.mkdir()
+        self.secret = "gh" + "p_" + rnd(36)
+        self.forbidden = [self.secret, self.secret[:12]]
+        for h in (hashlib.sha256, hashlib.sha1, hashlib.md5):
+            self.forbidden += [h(self.secret.encode()).hexdigest(), h(self.secret.encode()).hexdigest()[:12]]
+
+    def tearDown(self):
+        for p in self.fx.audit.rglob("*"):
+            p.chmod(0o700)
+        self.tmp.cleanup()
+
+    def leak(self, cwd="/home/dev/proj", m=10):
+        write_session(self.fx.projects, [call("c", "cat .env", m), result("c", f"value {self.secret}", m)],
+                      cwd=cwd)
+
+    def reports(self):
+        return [v for k, v in sorted(self.fx.files().items())
+                if k.startswith("reports/") and not k.endswith("_timeline.md")]
+
+    def log(self):
+        return self.fx.read(self.fx.audit / "audit.log")
+
+    def assertNoLeak(self, text):
+        for f in self.forbidden:
+            self.assertNotIn(f, text)
+
+    def test_allowlisted_finding_is_reported_but_does_not_alert(self):
+        (self.fx.audit / "allow").write_text("# fixture sessions\n\n/home/dev/fixture-*\n")
+        self.leak(cwd="/home/dev/fixture-redact")
+        p = self.fx.run(STUB_MODE="clean")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertNoLeak(self.fx.everything(p))
+        [report] = self.reports()
+        self.assertIn("**VERDICT: CLEAN**", report)
+        self.assertIn("secrets exposed: 0 (+1 allowlisted)", report)
+        self.assertIn("## Secrets exposed (deterministic; any one flags the run)\n- none", report)
+        allowed = report.split("## Secrets exposed in allowlisted sessions")[1].split("\n## ")[0]
+        self.assertRegex(allowed, r"\n- SECRET-EXPOSED \S+ \w{8} \(/home/dev/fixture-redact\) "
+                         r"github-token in tool result \(Bash\): \[REDACTED:github-token#1\]")
+        self.assertFalse(self.fx.alerts.exists())
+        self.assertIn("allowlisted=1", self.log())
+
+    def test_allowlist_spares_only_matching_sessions(self):
+        (self.fx.audit / "allow").write_text("/home/dev/fixture-*\n")
+        self.leak(cwd="/home/dev/fixture-redact")
+        self.leak(cwd="/home/dev/real-work")
+        p = self.fx.run(STUB_MODE="clean")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        [alert] = self.fx.alert_lines()
+        self.assertIn("FLAGGED (1 SECRET-EXPOSED)", alert[0])
+        self.assertIn("secrets exposed: 1 (+1 allowlisted)", self.reports()[0])
+
+    def test_model_verdict_in_allowlisted_session_still_alerts(self):
+        (self.fx.audit / "allow").write_text("/home/dev/fixture-*\n")
+        self.leak(cwd="/home/dev/fixture-redact")
+        p = self.fx.run(STUB_MODE="flagged")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        [alert] = self.fx.alert_lines()
+        self.assertIn("FLAGGED (1 HIGH)", alert[0])
+        self.assertNotIn("SECRET-EXPOSED", alert[0])
+
+    def test_unreadable_allowlist_is_noted_and_ignored(self):
+        (self.fx.audit / "allow").mkdir()
+        self.leak(cwd="/home/dev/fixture-redact")
+        p = self.fx.run(STUB_MODE="clean")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertEqual(len(self.fx.alert_lines()), 1)
+        self.assertIn("allowlist", self.log())
+        self.assertIn("unreadable", self.log())
+
+    def test_stdout_mode_shows_allowlisted_separately(self):
+        (self.fx.audit / "allow").write_text("/home/dev/fixture-*\n")
+        self.leak(cwd="/home/dev/fixture-redact")
+        before = self.fx.files()
+        p = self.fx.run("--stdout", "--no-llm")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("## Secrets exposed in allowlisted sessions", p.stdout)
+        self.assertEqual(self.fx.files(), before)  # writes nothing, creates no key
+
+    def two_runs(self, between=None):
+        self.leak(cwd="/home/dev/a")
+        p1 = self.fx.run(STUB_MODE="clean")
+        self.assertEqual(p1.returncode, 2, p1.stderr)
+        if between:
+            between()
+        time.sleep(1.1)  # report names have one-second resolution
+        self.leak(cwd="/home/dev/b", m=-1)  # after the first run's window
+        p2 = self.fx.run(STUB_MODE="clean")
+        self.assertEqual(p2.returncode, 2, p2.stderr)
+        self.assertNoLeak(self.fx.everything(p1) + self.fx.everything(p2))
+        return p2
+
+    def test_same_secret_twice_in_a_day_alerts_once(self):
+        self.two_runs()
+        self.assertEqual(len(self.fx.alert_lines()), 1)
+        r1, r2 = self.reports()
+        self.assertIn("**VERDICT: FLAGGED**", r2)
+        entries = [l for r in (r1, r2) for l in r.splitlines() if l.startswith("- SECRET-EXPOSED ")]
+        self.assertEqual(len(entries), 2, entries)
+        self.assertNotIn("repeat", entries[0])
+        self.assertIn("(/home/dev/b)", entries[1])
+        self.assertIn("(repeat: already alerted in the last 24h)", entries[1])
+        self.assertIn("secrets exposed: 1", r2)
+        lines = self.log().splitlines()
+        self.assertIn("alert=yes", lines[0])
+        self.assertIn("repeats=1", lines[1])
+        self.assertIn("alert=no", lines[1])
+
+    def test_secret_alerts_again_after_a_day(self):
+        def age():
+            f = self.fx.audit / "alerted.json"
+            old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=25)).isoformat()
+            f.write_text(json.dumps({k: old for k in json.loads(f.read_text())}))
+        self.two_runs(between=age)
+        self.assertEqual(len(self.fx.alert_lines()), 2)
+        self.assertNotIn("repeat", self.reports()[1])
+
+    def test_failed_alert_is_not_remembered(self):
+        self.leak(cwd="/home/dev/a")
+        p = self.fx.run("--on-flag", "exit 7", STUB_MODE="clean")
+        self.assertIn("ALERT-FAILED", self.log())
+        self.leak(cwd="/home/dev/b", m=-1)
+        self.fx.run(STUB_MODE="clean")
+        self.assertEqual(len(self.fx.alert_lines()), 2, p.stderr)
+
+    def test_key_and_state_hold_no_secret(self):
+        self.leak()
+        self.fx.run(STUB_MODE="clean")
+        key, state = self.fx.audit / "alert.key", self.fx.audit / "alerted.json"
+        self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(state.stat().st_mode & 0o777, 0o600)
+        raw = state.read_text()
+        self.assertNoLeak(raw)
+        digests = json.loads(raw)
+        self.assertEqual(len(digests), 1)
+        for d, when in digests.items():
+            self.assertRegex(d, r"^[0-9a-f]{64}$")
+            self.assertIsNotNone(audit.parse_ts(when))
+        for f, text in self.fx.files().items():
+            if f not in ("alert.key", "alerted.json"):
+                self.assertFalse(set(digests) & set(re.findall(r"[0-9a-f]{12,}", text)), f)
+        self.assertFalse(any(d in json.dumps(self.fx.alert_lines()) for d in digests))
+
+    def assert_alerts_twice_with_note(self, broken, note):
+        self.two_runs(between=broken)
+        self.assertEqual(len(self.fx.alert_lines()), 2)
+        self.assertIn(note, self.log().splitlines()[1])
+
+    def test_unreadable_key_still_alerts(self):
+        def broken():
+            (self.fx.audit / "alert.key").chmod(0)
+        self.assert_alerts_twice_with_note(broken, "alert dedupe off")
+
+    def test_corrupt_key_still_alerts(self):
+        self.assert_alerts_twice_with_note(lambda: (self.fx.audit / "alert.key").write_bytes(b"short"),
+                                           "alert dedupe off")
+
+    def test_unreadable_state_still_alerts(self):
+        self.assert_alerts_twice_with_note(lambda: (self.fx.audit / "alerted.json").chmod(0),
+                                           "alert history unreadable")
+
+    def test_corrupt_state_still_alerts(self):
+        self.assert_alerts_twice_with_note(
+            lambda: (self.fx.audit / "alerted.json").write_text("{not json"), "alert history unreadable")
+
+    def test_unwritable_state_is_logged(self):
+        def broken():
+            f = self.fx.audit / "alerted.json"
+            f.unlink()
+            f.mkdir()
+        self.assert_alerts_twice_with_note(broken, "alert history unreadable")
+        self.assertIn("DEDUPE-FAILED", self.log())
+
+
 class InstallScheduleTest(unittest.TestCase):
     """install-schedule.sh wires tg-notify by absolute path into cron and launchd."""
 
@@ -579,6 +762,85 @@ class RedactorTest(unittest.TestCase):
         self.assertEqual([k for k, _ in hits], ["config-secret", "config-secret"])
         self.assertEqual(out["user"], "app")
 
+    def test_secret_names_next_to_pagination(self):
+        for name in ("GH_PAGES_TOKEN", "CURSOR_API_TOKEN", "NEXTCLOUD_TOKEN", "ASYNC_WORKER_TOKEN",
+                     "ASYNC_TOKEN", "RSYNC_TOKEN", "CURSOR_TOKEN"):
+            self.assertTrue(audit._secret_name(name), name)
+            v = rnd(24)
+            self.assertRedacts(f"{name}={v}", v, "env-secret")
+            self.assertRedacts(f"{name.lower()}: {v}", v, "config-secret")
+        for name in ("NextToken", "nextToken", "NEXT_TOKEN", "pageToken", "nextPageToken",
+                     "NEXT_PAGE_TOKEN", "continuationToken", "NextContinuationToken",
+                     "syncToken", "nextSyncToken"):
+            self.assertFalse(audit._secret_name(name), name)
+        aws_page = json.dumps({"Users": [], "NextToken": rnd(60)}, indent=4)
+        self.assertEqual(audit.find_secrets(aws_page), [], aws_page)
+        self.assertEqual(audit.find_secrets(f"NEXT_TOKEN={rnd(40)}"), [])
+
+    def test_dict_key_path_covers_password_names_not_bare_keys(self):
+        for k in ("pass", "pwd", "PASS", "db_pass", "ssh_pwd", "password", "client_secret",
+                  "access_token", "apiKey", "x-api-key"):
+            pw = rnd(14)
+            hits = []
+            out = audit.Redactor().deep({"host": "db", k: pw}, hits)
+            self.assertNotIn(pw, json.dumps(out), k)
+            self.assertEqual([h for h, _ in hits], ["config-secret"], k)
+        ordinary = {"key": "ArrowDown", "keys": "Control+a", "issue_key": "PROJ-1234",
+                    "Key": "src/app.py", "s3_key": "reports/2026/q3-summary.csv",
+                    "token_type": "bearer"}
+        for k, v in ordinary.items():
+            hits = []
+            self.assertEqual(audit.Redactor().deep({k: v}, hits), {k: v}, k)
+            self.assertEqual(hits, [], k)
+        tool_input = {"command": "x", "args": ordinary}
+        red = audit.Redactor()
+        hits = []
+        self.assertEqual(audit.find_secrets(red.clip(red.deep(tool_input, hits), 1500, hits)), [])
+        self.assertEqual(hits, [])
+
+    def test_headered_key_without_end(self):
+        body = [rnd(64, ALNUM + "+/") for _ in range(3)]
+        heads = ["Proc-Type: 4,ENCRYPTED", "DEK-Info: AES-128-CBC,0A1B2C", "Comment: a b",
+                 'Comment: "Alice <a@b.example>"', "Comment: C:\\keys\\a", "Version: GnuPG v2"]
+        for n in (1, 2, len(heads)):
+            for nl in ("\n", "\r\n", "\\n", "\\r\\n"):
+                hs = heads[:n] if nl in ("\n", "\r\n") else [h.replace('"', '\\"') for h in heads[:n]]
+                text = "-----BEGIN RSA " + "PRIVATE KEY-----" + nl + nl.join(hs) + nl + nl + nl.join(body)
+                for end in ("", nl + "-----END RSA " + "PRIVATE KEY-----"):
+                    out, hits = audit.Redactor().redact(text + end)
+                    self.assertEqual([k for k, _ in hits], ["private-key"], (n, nl, end))
+                    for b in body:
+                        self.assertNotIn(b[:12], out, (n, nl, end))
+
+    def test_header_does_not_cross_a_json_string(self):
+        body, tok = rnd(64, ALNUM + "+/"), "gh" + "p_" + rnd(36)
+        value = {"a": "-----BEGIN RSA " + "PRIVATE KEY-----\nNote: x", "b": f"see\n{body}\n{tok}"}
+        red = audit.Redactor()
+        hits = []
+        out = red.clip(red.deep(value, hits), 5000, hits)
+        self.assertEqual([k for k, _ in hits], ["github-token"], out)
+        self.assertNotIn(tok, out)
+        self.assertIn(body, out)  # field b is not swallowed into a key placeholder
+        self.assertEqual(audit.find_secrets(out), [])
+
+    def test_aws_secret_with_leading_slash(self):
+        for inner in (rnd(39, ALNUM + "+"), rnd(20, ALNUM + "+") + "/" + rnd(18, ALNUM + "+")):
+            s = "/" + inner
+            self.assertRedacts(f"[default]\naws_secret_access_key = {s}\n", s, "config-secret")
+            self.assertRedacts(f"AWS_SECRET_ACCESS_KEY={s} aws s3 ls", s, "env-secret")
+            hits = []
+            out = audit.Redactor().deep({"aws_secret_access_key": s}, hits)
+            self.assertNotIn(s, json.dumps(out))
+            self.assertEqual([k for k, _ in hits], ["config-secret"])
+        for t in ("password: /run/secrets/db1", "token: /var/run/secrets/token1",
+                  "PASSWORD=/run/secrets/db1", "SECRET_FILE_TOKEN=/var/run/secrets/token1",
+                  "SSH_KEY=/Users/me/.ssh/id_ed25519", "token: /Users/Me/Library/Keys/token2",
+                  "token: /Users/Me/Library/Keychains/Tokens/token2"):
+            self.assertEqual(audit.find_secrets(t), [], t)
+        hits = []
+        audit.Redactor().deep({"password": "/run/secrets/db1", "token": "/var/run/secrets/token1"}, hits)
+        self.assertEqual(hits, [])
+
     def test_clipping_never_trips_the_self_check(self):
         red = audit.Redactor()
         text = ("# .env.example\nOPENAI_API_KEY=sk-proj-" + "x" * 40 + "\nAWS_ID=AKIA"
@@ -612,6 +874,8 @@ class RedactorTest(unittest.TestCase):
             ("X: " + begin + "\nComment: c\n") * n(2000),
             begin + "\nERROR: " + "ka: v " * n(16000),
             begin + "\n" + '"' * n(50_000) + "," * n(50_000),
+            (begin + "\nA: ") * n(4000), (begin + "\\nA: ") * n(4000),
+            begin + "\nComment: " + "\\x" * n(50_000),
             begin + "\n" + ("'" + "A" * 15 + "'\n") * n(5000),
             "password: abc123def456ghi" + " " * n(100_000) + "x",
             "  token = " + "a1" * n(50_000) + " x",

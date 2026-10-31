@@ -1,0 +1,17 @@
+# agent-audit allowlist: copy to ~/.claude-audit/allow (or $CLAUDE_AUDIT_DIR/allow).
+#
+# One glob per line, matched against a session's working directory (cwd).
+# `*` also matches `/`, and a leading `~` is your home folder. Lines starting
+# with `#` and blank lines are ignored. No file means no allowlist.
+#
+# A SECRET-EXPOSED finding from a matching session still appears in the report,
+# under "Secrets exposed in allowlisted sessions", but it doesn't make the run
+# FLAGGED and doesn't alert. The model's own FLAGGED or CRITICAL verdict on that
+# session still alerts.
+#
+# List only sessions that plant fake secrets on purpose, such as redaction tests.
+# A glob that is too broad hides real leaks.
+#
+# Examples:
+# ~/dev/*/my-redaction-lib/.claude/worktrees/*
+# /home/me/dev/private/ai-dev/.claude/worktrees/agent-audit
