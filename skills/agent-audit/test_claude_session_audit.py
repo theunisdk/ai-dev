@@ -206,6 +206,7 @@ def secrets_session(fx, planted):
             entries += [call(tid, text), result(tid, "done")]
         else:
             entries += [call(tid, "cat config"), result(tid, text)]
+    entries.append(result("toolu_0", planted[0][2]))  # seen again: still one finding
     return write_session(fx.projects, entries, subagent=True)
 
 
@@ -224,6 +225,7 @@ class SecretsTest(unittest.TestCase):
             self.assertNotIn(f, text)
 
     def test_redacted_everywhere_and_each_secret_reported(self):
+        write_session(self.fx.projects, [user(self.planted[0][2])], cwd="/home/dev/second")
         p = self.fx.run("--on-flag", "exit 7", STUB_MODE="clean")
         self.assertEqual(p.returncode, 2, p.stderr)
         self.assertNoLeak(self.fx.everything(p))
@@ -232,8 +234,12 @@ class SecretsTest(unittest.TestCase):
         report = next(v for k, v in files.items()
                       if k.startswith("reports/") and not k.endswith("_timeline.md"))
         timeline = next(v for k, v in files.items() if k.endswith("_timeline.md"))
-        self.assertIn("**VERDICT: FLAGGED**", report)  # the model said CLEAN
+        self.assertIn("**VERDICT: FLAGGED**", report)
+        self.assertIn("### batch 1 of 1: CLEAN", report)
         lines = [l for l in report.splitlines() if l.startswith("- SECRET-EXPOSED ")]
+        second = [l for l in lines if "(/home/dev/second)" in l]
+        lines = [l for l in lines if l not in second]
+        self.assertEqual(len(second), 1, second)
         self.assertEqual(len(lines), len(self.planted), "\n".join(lines))
         got = collections.Counter(re.search(r"\) (\S+) in ", l).group(1) for l in lines)
         self.assertEqual(got, collections.Counter(k for k, _, _ in self.planted))
@@ -253,11 +259,26 @@ class SecretsTest(unittest.TestCase):
         self.assertEqual(len(alerts), 1)
         self.assertEqual(len(alerts[0]), 1)
         alert = alerts[0][0]
-        self.assertIn(f"FLAGGED ({len(self.planted)} SECRET-EXPOSED)", alert)
+        self.assertIn(f"FLAGGED ({len(self.planted) + 1} SECRET-EXPOSED)", alert)
         self.assertNotIn("MODEL-MARKER", alert)
         self.assertNotIn("REDACTED", alert)
         self.assertIn("ALERT-FAILED on-flag #2 exited 7", files["audit.log"])
         self.assertTrue((self.fx.audit / "last_run").exists())
+
+    def test_clean_session_is_clean_and_silent(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        fx = Fixture(tmp.name)
+        write_session(fx.projects, [user("run the tests"), agent("all 12 passed")])
+        p = fx.run(STUB_MODE="clean")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("=====STUB-CALL=====", fx.read(fx.capture))
+        report = next(v for k, v in fx.files().items()
+                      if k.startswith("reports/") and not k.endswith("_timeline.md"))
+        self.assertIn("**VERDICT: CLEAN**", report)
+        self.assertIn("## Secrets exposed (deterministic; any one flags the run)\n- none", report)
+        self.assertTrue((fx.audit / "last_run").exists())
+        self.assertFalse(fx.alerts.exists())
 
     def test_stdout_mode_is_redacted(self):
         p = self.fx.run("--stdout", "--no-llm")
@@ -268,7 +289,7 @@ class SecretsTest(unittest.TestCase):
 
     def test_output_form_secrets_are_findings(self):
         tok = rnd(40)
-        aws = rnd(40, ALNUM + "/+")
+        aws = random.choice(ALNUM + "+") + rnd(39, ALNUM + "/+")  # a leading "/" is #30 item 4
         self.forbidden += [tok, aws, tok[:12], aws[:12]]
         write_session(self.fx.projects, [
             {"type": "assistant", "timestamp": ts(5), "message": {"content": [
@@ -318,7 +339,7 @@ class SecretsTest(unittest.TestCase):
         self.assertEqual((self.fx.audit / "last_run").read_text(), before)
         self.assertIn("1 FILE-SKIPPED", self.fx.alert_lines()[0][0])
 
-    def _assert_failed_closed(self, p, before):
+    def _assert_failed_closed(self, p, before, where):
         self.assertEqual(p.returncode, 3, p.stderr)
         self.assertEqual(self.fx.files(), before)
         self.assertNotIn("SECRET", p.stdout)
@@ -326,7 +347,8 @@ class SecretsTest(unittest.TestCase):
         alerts = self.fx.alert_lines()
         self.assertEqual(len(alerts), 1)
         self.assertRegex(alerts[0][0], r"^Claude audit on \S+: redaction self-check failed$")
-        self.assertRegex(p.stderr, r"redaction self-check failed \([a-z-]+(, [a-z-]+)* in [^)]+\)")
+        self.assertRegex(p.stderr, r"redaction self-check failed \([a-z-]+(, [a-z-]+)* in "
+                         + re.escape(where) + r"\)")
 
     def test_fails_closed_before_the_model_sees_a_leak(self):
         self.fx.audit.mkdir()
@@ -334,7 +356,7 @@ class SecretsTest(unittest.TestCase):
         before = self.fx.files()
         p = self.fx.run(prelude="m.Redactor.redact = lambda self, t: (t, [])",
                         STUB_MODE="clean")
-        self._assert_failed_closed(p, before)
+        self._assert_failed_closed(p, before, "the model input")
         self.assertEqual(self.fx.read(self.fx.capture), "")  # nothing sent to the model
 
     def test_fails_closed_when_the_review_leaks(self):
@@ -345,7 +367,7 @@ class SecretsTest(unittest.TestCase):
         self.forbidden.append(leak)
         p = self.fx.run(prelude="m.Redactor.clean = lambda self, t: t",
                         STUB_MODE="leak", STUB_LEAK=leak)
-        self._assert_failed_closed(p, before)
+        self._assert_failed_closed(p, before, "the report")
         self.assertIn("=====STUB-CALL=====", self.fx.read(self.fx.capture))
 
 
@@ -368,9 +390,11 @@ class BatchTest(unittest.TestCase):
         entries = [user(f"{marker} {i} {body}") for i in range(n)]
         write_session(self.fx.projects, entries, cwd=cwd)
 
-    def run_two(self, bad_marker):
-        self.big_session("ordinary work", "/home/dev/a")
-        self.big_session(bad_marker, "/home/dev/b")
+    def run_two(self, bad_marker, bad_first):
+        """Batches follow file mtime, so the session written first is batch 1."""
+        for marker, cwd in sorted([("ordinary work", "/home/dev/a"), (bad_marker, "/home/dev/b")],
+                                  key=lambda x: (x[0] == bad_marker) != bad_first):
+            self.big_session(marker, cwd)
         p = self.fx.run(STUB_MODE="flagged")
         self.assertEqual(self.fx.read(self.fx.capture).count("=====STUB-CALL====="), 2,
                          "the fixture must split into two review batches")
@@ -383,14 +407,23 @@ class BatchTest(unittest.TestCase):
         self.assertIn("**VERDICT: FLAGGED**", report)
         self.assertIn("last_run not advanced", report)
         self.assertIn("last_run not advanced", files["audit.log"])
-        return report, self.fx.alert_lines()
+        bad, good = (1, 2) if bad_first else (2, 1)
+        self.assertIn(f"### batch {good} of 2: FLAGGED", report)
+        return report, self.fx.alert_lines(), bad
+
+    def both_orders(self, bad_marker):
+        for bad_first in (False, True):
+            with self.subTest(bad_first=bad_first):
+                self.tearDown()
+                self.setUp()
+                yield self.run_two(bad_marker, bad_first)
 
     def test_failed_batch_keeps_the_other_review(self):
-        report, alerts = self.run_two("FAILME")
-        self.assertRegex(report, r"- batch [12] of 2 failed: ")
-        self.assertRegex(report, r"### batch [12] of 2: FAILED")
-        self.assertEqual(len(alerts), 1)
-        self.assertIn("1 HIGH, 1 BATCH-FAILED", alerts[0][0])
+        for report, alerts, bad in self.both_orders("FAILME"):
+            self.assertIn(f"- batch {bad} of 2 failed: ", report)
+            self.assertIn(f"### batch {bad} of 2: FAILED", report)
+            self.assertEqual(len(alerts), 1)
+            self.assertIn("1 HIGH, 1 BATCH-FAILED", alerts[0][0])
 
     def test_failed_batch_error_is_redacted(self):
         leak = "sk-" + "ant-api03-" + rnd(40)
@@ -400,6 +433,9 @@ class BatchTest(unittest.TestCase):
         self.assertEqual(p.returncode, 3, p.stderr)
         self.assertNotIn(leak, self.fx.everything(p))
         self.assertNotIn(leak[:12], self.fx.everything(p))
+        report = next(v for k, v in self.fx.files().items()
+                      if k.startswith("reports/") and not k.endswith("_timeline.md"))
+        self.assertIn("boom: model unavailable [REDACTED:anthropic-key#1]", report)
 
     def test_all_batches_failed(self):
         write_session(self.fx.projects, [user("FAILME please")])
@@ -409,9 +445,9 @@ class BatchTest(unittest.TestCase):
         self.assertIn("REVIEW-FAILED (1 BATCH-FAILED)", self.fx.alert_lines()[0][0])
 
     def test_unclear_batch_is_not_hidden(self):
-        report, alerts = self.run_two("UNCLEARME")
-        self.assertRegex(report, r"- batch [12] of 2 came back UNCLEAR")
-        self.assertIn("1 BATCH-UNCLEAR", alerts[0][0])
+        for report, alerts, bad in self.both_orders("UNCLEARME"):
+            self.assertIn(f"- batch {bad} of 2 came back UNCLEAR", report)
+            self.assertIn("1 BATCH-UNCLEAR", alerts[0][0])
 
 
 class InstallScheduleTest(unittest.TestCase):
@@ -498,7 +534,7 @@ class RedactorTest(unittest.TestCase):
         self.assertIn(kind, [k for k, _ in hits], text)
 
     def test_more_shapes(self):
-        aws_secret = random.choice(ALNUM) + rnd(39, ALNUM + "/+")  # a leading "/" is #30 item 4
+        aws_secret = random.choice(ALNUM + "+") + rnd(39, ALNUM + "/+")  # a leading "/" is #30 item 4
         self.assertRedacts(f"[default]\naws_access_key_id = AK" + "IA" + rnd(16, string.ascii_uppercase)
                            + f"\naws_secret_access_key = {aws_secret}\n", aws_secret, "config-secret")
         pw = rnd(20)
@@ -534,10 +570,25 @@ class RedactorTest(unittest.TestCase):
         self.assertEqual([k for k, _ in hits], ["config-secret", "config-secret"])
         self.assertEqual(out["user"], "app")
 
+    def test_clipping_never_trips_the_self_check(self):
+        red = audit.Redactor()
+        text = ("# .env.example\nOPENAI_API_KEY=sk-proj-" + "x" * 40 + "\nAWS_ID=AKIA"
+                + "Q" * 16 + "XYZ\nBOT=" + "1" * 9 + ":" + "a" * 40 + "\nDB_PASSWORD=****")
+        for n in range(1, len(text) + 1):
+            self.assertEqual(audit.find_secrets(red.clip(text, n)), [], n)
+
     def test_every_rule_is_fast_on_adversarial_input(self):
+        # In a subprocess: a catastrophic regex never returns, and re can't be interrupted.
         for mb in (0.5, 1, 2):
             with self.subTest(mb=mb):
-                self._time_corpus(mb)
+                code = (f"import sys; sys.dont_write_bytecode = True; sys.path.insert(0, {str(HERE)!r}); "
+                        f"import test_claude_session_audit as t; t.RedactorTest('_time_corpus')._time_corpus({mb})")
+                try:
+                    p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                       timeout=30)
+                except subprocess.TimeoutExpired:
+                    self.fail(f"{mb}MB: still running after 30s")
+                self.assertEqual(p.returncode, 0, p.stderr[-2000:])
 
     def _time_corpus(self, mb):
         import time
