@@ -53,6 +53,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -83,7 +84,7 @@ RISKY_RE = re.compile(
     r"(curl|wget)[^|]*\|\s*(ba|z)?sh|\bbase64\s+(-d|--decode)|\beval\b|\bnc\s+-|"
     r"\.env\b|id_rsa|id_ed25519|\.ssh/|\.aws/|credentials|\.npmrc|\.pypirc|"
     r"api[_-]?key|secret|token|password|"
-    r"\.claude/settings|\.claude\.json|settings\.local\.json|dangerously|bypassPermissions|"
+    r"\.claude/settings|\.claude\.json|\.claude-audit|settings\.local\.json|dangerously|bypassPermissions|"
     r"\bmkfs\b|\bdd\s+if=|crontab|launchctl|systemctl|/etc/", re.I)
 
 
@@ -143,7 +144,7 @@ def _dict_secret_name(name):
     keystrokes, issue keys and object paths, so those values rely on the format rules."""
     parts = [p for p in re.split(r"[_.\-]", name.upper()) if p]
     return _secret_name(name) and (
-        re.search(r"PASSWORD|PASSWD|SECRET|TOKEN|APIKEY", "".join(parts)) is not None
+        re.search(r"PASSWORD|PASSWD|SECRET|TOKEN|APIKEY|ACCESSKEY", "".join(parts)) is not None
         or parts[-1] in ("PASS", "PWD"))
 
 
@@ -158,16 +159,17 @@ def _config_check(m):
 
 
 # One header line (Proc-Type: …, Comment: …), raw or JSON-escaped. Its value never
-# crosses an unescaped JSON string end. (?=(?P<x>…))(?P=x) is an atomic group: no
-# backtracking, so a chain of BEGIN lines stays linear.
+# crosses an unescaped JSON string end or a BEGIN line. (?=(?P<x>…))(?P=x) is an
+# atomic group: no backtracking, so a chain of BEGIN lines stays linear.
 _PEM_HEADER = (r"(?:(?:\r?\n|(?:\\r)?\\n)[ \t]*[A-Za-z][A-Za-z\-]*:[ \t]"
-               r"(?=(?P<hv>(?:[^\r\n\\\"]+|\\[^nr\r\n]|\"(?![ \t]*[,:}\]]))*))(?P=hv)"
+               r"(?=(?P<hv>(?:[^\r\n\\\"-]+|-(?!----)|\\[^nr\r\n]"
+               r"|\"(?![ \t]*(?:[,:][ \t]*(?:[\"\[{\d\-]|true|false|null)|[}\]])))*))(?P=hv)"
                r"(?=\r?\n|(?:\\r)?\\n))")
 
 
 SECRET_RULES = [
     # Headers (Proc-Type: …) may precede the body; a body cut off before its END
-    # line is still a key. A header value never crosses an unescaped JSON string end.
+    # line is still a key.
     ("private-key", re.compile(
         r"-----BEGIN (?P<t>[A-Z0-9 ]*)PRIVATE KEY(?: BLOCK)?-----"
         r"(?=(?P<hd>" + _PEM_HEADER + r"{0,16}))(?P=hd)"
@@ -375,21 +377,35 @@ def load_allowlist(d, notes):
     except (OSError, UnicodeDecodeError) as ex:
         notes.append(f"allowlist {f} unreadable ({type(ex).__name__}), ignored")
         return []
-    return [os.path.expanduser(l.strip()) for l in text.splitlines()
-            if l.strip() and not l.strip().startswith("#")]
+    globs = []
+    for line in text.splitlines():
+        g = os.path.expanduser(line.strip())
+        if not g or g.startswith("#"):
+            continue
+        if fnmatch.fnmatchcase("/", g) or fnmatch.fnmatchcase("/x/y", g):
+            notes.append(f"allowlist glob {g!r} matches any path, ignored")
+        else:
+            globs.append(g)
+    return globs
 
 
 def allowlisted(cwd, globs):
     return bool(cwd) and any(fnmatch.fnmatchcase(cwd, g) for g in globs)
 
 
-def _write_private(path, data):
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as fh:
-        os.fchmod(fh.fileno(), 0o600)
-        fh.write(data)
-    os.replace(tmp, path)
+def _write_private(path, data, replace=True):
+    """Write a 0600 file whole or not at all. replace=False never overwrites."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        if replace:
+            os.replace(tmp, path)
+        else:
+            os.link(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 class AlertMemory:
@@ -434,9 +450,9 @@ class AlertMemory:
         seen = {}
         for digest, when in data.items():
             t = parse_ts(when) if isinstance(when, str) else None
-            if not re.fullmatch(r"[0-9a-f]{64}", digest) or t is None:
+            if not re.fullmatch(r"[0-9a-f]{64}", digest) or t is None or t.tzinfo is None:
                 raise ValueError("bad entry")
-            if self.now - t < REALERT_AFTER:
+            if dt.timedelta(0) <= self.now - t < REALERT_AFTER:  # a future time is no alert
                 seen[digest] = when
         return seen
 
@@ -454,15 +470,15 @@ class AlertMemory:
         if not digests:
             return None
         self.seen.update({d: self.now.isoformat() for d in digests})
+        f = self.key_file
         try:
-            if self.new_key:  # O_EXCL: a key another run just wrote is not overwritten
-                fd = os.open(self.key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(fd, "w") as fh:
-                    fh.write(self.key.hex() + "\n")
+            if self.new_key:  # a key another run just wrote is not overwritten
+                _write_private(f, (self.key.hex() + "\n").encode(), replace=False)
                 self.new_key = False
-            _write_private(self.state_file, json.dumps(self.seen, sort_keys=True).encode())
+            f = self.state_file
+            _write_private(f, json.dumps(self.seen, sort_keys=True).encode())
         except OSError as ex:
-            return f"could not write {self.state_file.name} ({type(ex).__name__})"
+            return f"could not write {f.name} ({type(ex).__name__})"
         return None
 
 
@@ -924,6 +940,8 @@ def run(args, red, host):
         alert_counts["SECRET-EXPOSED"] = len(live)
     if repeats:
         alert_counts["REPEAT"] = repeats
+    if spared:
+        alert_counts["ALLOWLISTED"] = len(spared)
     for sev in SEVERITIES + ("OTHER",):
         if counts.get(sev):
             alert_counts[sev] = counts[sev]
@@ -944,7 +962,8 @@ def run(args, red, host):
     log_line = (f"{now.isoformat()} {verdict} sessions={len(sections)} "
                 f"hits={len(all_flags)} secrets={len(live)} repeats={repeats} "
                 f"allowlisted={len(spared)} problems={len(problems)} "
-                f"alert={'yes' if should_alert else 'no'} report={report}"
+                f"alert={('yes' if args.on_flag else 'none-configured') if should_alert else 'no'} "
+                f"report={report}"
                 + "".join(f"; {red.clean(n)}" for n in notes)
                 + ("; last_run not advanced" if problems else "") + "\n")
     stdout_line = f"{verdict}: {report}"

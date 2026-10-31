@@ -517,7 +517,7 @@ class AlertVolumeTest(unittest.TestCase):
         p = self.fx.run(STUB_MODE="clean")
         self.assertEqual(p.returncode, 2, p.stderr)
         [alert] = self.fx.alert_lines()
-        self.assertIn("FLAGGED (1 SECRET-EXPOSED)", alert[0])
+        self.assertIn("FLAGGED (1 SECRET-EXPOSED, 1 ALLOWLISTED)", alert[0])
         self.assertIn("secrets exposed: 1 (+1 allowlisted)", self.reports()[0])
 
     def test_model_verdict_in_allowlisted_session_still_alerts(self):
@@ -526,8 +526,29 @@ class AlertVolumeTest(unittest.TestCase):
         p = self.fx.run(STUB_MODE="flagged")
         self.assertEqual(p.returncode, 2, p.stderr)
         [alert] = self.fx.alert_lines()
-        self.assertIn("FLAGGED (1 HIGH)", alert[0])
+        self.assertIn("FLAGGED (1 ALLOWLISTED, 1 HIGH)", alert[0])
         self.assertNotIn("SECRET-EXPOSED", alert[0])
+
+    def test_allowlist_expands_home_and_ignores_match_all_globs(self):
+        (self.fx.audit / "allow").write_text("*\n/*\n~/fixture-*\n")
+        self.leak(cwd=str(self.fx.root / "home" / "fixture-redact"))
+        self.leak(cwd="/home/dev/real-work")
+        p = self.fx.run(STUB_MODE="clean")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("FLAGGED (1 SECRET-EXPOSED, 1 ALLOWLISTED)", self.fx.alert_lines()[0][0])
+        self.assertIn("allowlist glob '*' matches any path, ignored", self.log())
+        self.assertIn("allowlist glob '/*' matches any path, ignored", self.log())
+
+    def test_editing_the_audit_dir_is_a_pattern_hit(self):
+        self.assertTrue(audit.RISKY_RE.search("echo '*' >> ~/.claude-audit/allow"))
+
+    def test_alert_with_no_command_is_logged_as_unconfigured(self):
+        self.leak()
+        p = subprocess.run([sys.executable, str(SCRIPT), "--claude-bin", str(self.fx.claude)],
+                           capture_output=True, text=True, env=self.fx.env(STUB_MODE="clean"))
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertIn("alert=none-configured", self.log())
+        self.assertFalse((self.fx.audit / "alerted.json").exists())
 
     def test_unreadable_allowlist_is_noted_and_ignored(self):
         (self.fx.audit / "allow").mkdir()
@@ -584,6 +605,34 @@ class AlertVolumeTest(unittest.TestCase):
         self.two_runs(between=age)
         self.assertEqual(len(self.fx.alert_lines()), 2)
         self.assertNotIn("repeat", self.reports()[1])
+
+    def test_repeat_and_new_secret_together(self):
+        self.leak(cwd="/home/dev/a")
+        self.fx.run(STUB_MODE="clean")
+        other = "gh" + "p_" + rnd(36)
+        self.forbidden += [other, other[:12]]
+        time.sleep(1.1)
+        write_session(self.fx.projects, [call("c", "x", -1), result("c", f"{self.secret} {other}", -1)],
+                      cwd="/home/dev/b")
+        p = self.fx.run(STUB_MODE="clean")
+        self.assertNoLeak(self.fx.everything(p))
+        alerts = self.fx.alert_lines()
+        self.assertEqual(len(alerts), 2)
+        self.assertIn("FLAGGED (2 SECRET-EXPOSED, 1 REPEAT)", alerts[1][0])
+        self.assertEqual(len(json.loads((self.fx.audit / "alerted.json").read_text())), 2)
+
+    def test_future_dated_history_does_not_suppress(self):
+        def future():
+            f = self.fx.audit / "alerted.json"
+            f.write_text(json.dumps({k: "2099-01-01T00:00:00+00:00" for k in json.loads(f.read_text())}))
+        self.two_runs(between=future)
+        self.assertEqual(len(self.fx.alert_lines()), 2)
+
+    def test_naive_timestamp_in_history_still_alerts(self):
+        def naive():
+            f = self.fx.audit / "alerted.json"
+            f.write_text(json.dumps({k: "2026-10-31T10:00:00" for k in json.loads(f.read_text())}))
+        self.assert_alerts_twice_with_note(naive, "alert history unreadable")
 
     def test_failed_alert_is_not_remembered(self):
         self.leak(cwd="/home/dev/a")
@@ -801,7 +850,8 @@ class RedactorTest(unittest.TestCase):
     def test_headered_key_without_end(self):
         body = [rnd(64, ALNUM + "+/") for _ in range(3)]
         heads = ["Proc-Type: 4,ENCRYPTED", "DEK-Info: AES-128-CBC,0A1B2C", "Comment: a b",
-                 'Comment: "Alice <a@b.example>"', "Comment: C:\\keys\\a", "Version: GnuPG v2"]
+                 'Comment: "Alice <a@b.example>"', "Comment: C:\\keys\\a", 'Comment: "Alice", work key',
+                 'Comment: "a":b', "Version: GnuPG v2"]
         for n in (1, 2, len(heads)):
             for nl in ("\n", "\r\n", "\\n", "\\r\\n"):
                 hs = heads[:n] if nl in ("\n", "\r\n") else [h.replace('"', '\\"') for h in heads[:n]]
@@ -822,6 +872,8 @@ class RedactorTest(unittest.TestCase):
         self.assertNotIn(tok, out)
         self.assertIn(body, out)  # field b is not swallowed into a key placeholder
         self.assertEqual(audit.find_secrets(out), [])
+        listed = json.dumps(["-----BEGIN RSA " + "PRIVATE KEY-----\nNote: x", 5, f"\n{body}"])
+        self.assertEqual(audit.find_secrets(listed), [], listed)
 
     def test_aws_secret_with_leading_slash(self):
         for inner in (rnd(39, ALNUM + "+"), rnd(20, ALNUM + "+") + "/" + rnd(18, ALNUM + "+")):
