@@ -87,6 +87,8 @@ _DUMMY_VALUES = {"pass", "password", "passwd", "pwd", "secret", "changeme", "exa
 _NAME_SUFFIXES = ("PASSWORD", "PASSWD", "SECRET", "SECRETS", "TOKEN", "TOKENS", "APIKEY",
                   "ACCESSKEY", "SECRETKEY", "PRIVATEKEY")
 _NAME_EXACT = {"KEY", "KEYS", "PASS", "PWD"}
+_NAME_QUALIFIERS = re.compile(r"BASE|LIVE|TEST|PROD|PRODUCTION|DEV|STAGING|STAGE|RO|RW|"
+                              r"OLD|NEW|PRIMARY|SECONDARY|V\d+|\d+")
 _NOT_SECRET_KEY = {"PUBLIC", "CACHE", "SORT", "PRIMARY", "FOREIGN", "PARTITION", "CONFIG",
                    "ROUTING", "SHARD", "IDEMPOTENCY", "LOOKUP", "MAP", "HASH", "INDEX"}
 
@@ -100,9 +102,12 @@ def _real_value(v, min_len):
 
 
 def _secret_name(name):
-    """The last word of the name says what it holds: DB_PASSWORD, PGPASSWORD and
-    STRIPE_KEY do; SSH_KEY_PATH, PUBLIC_KEY and CACHE_KEY don't."""
-    parts = [p for p in re.split(r"[_.\-]", name.upper()) if p and not p.isdigit()]
+    """The last word of the name, after qualifiers like _PROD or _V2, says what it
+    holds: DB_PASSWORD, PGPASSWORD and SECRET_KEY_BASE do; SSH_KEY_PATH, PUBLIC_KEY
+    and CACHE_KEY don't."""
+    parts = [p for p in re.split(r"[_.\-]", name.upper()) if p]
+    while parts and _NAME_QUALIFIERS.fullmatch(parts[-1]):
+        parts.pop()
     if not parts:
         return False
     last = parts[-1]
@@ -126,8 +131,8 @@ SECRET_RULES = [
     # line is still a key.
     ("private-key", re.compile(
         r"-----BEGIN (?P<t>[A-Z0-9 ]*)PRIVATE KEY(?: BLOCK)?-----"
-        r"(?:(?:(?:\s|\\[nr])+[A-Za-z][A-Za-z\-]*:[ \t][^\n\\]*)*"
-        r"(?:[A-Za-z0-9+/=]|\s|\\[nr])*?-----END (?P=t)PRIVATE KEY(?: BLOCK)?-----"
+        r"(?:(?:(?:\r?\n|(?:\\r)?\\n)[ \t]*[A-Za-z][A-Za-z\-]*:[ \t][^\n\\]*)*"
+        r"(?:[A-Za-z0-9+/=\"',]|\s|\\[nr])*?-----END (?P=t)PRIVATE KEY(?: BLOCK)?-----"
         r"|(?:(?:\s|\\[nr])+[A-Za-z0-9+/=]{16,})+)"), None),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),
      None),
@@ -213,10 +218,16 @@ class Redactor:
     def clean(self, text):
         return self.redact(text)[0]
 
-    def clip(self, text, n):
-        """A cut can turn a value a rule rejected (a run of x's, an over-long ID)
-        into one it accepts, so the clipped text is redacted again."""
-        return self.clean(clip(self.clean(text) if isinstance(text, str) else text, n))
+    def clip(self, text, n, hits=None):
+        """Redact the text in its output form (CRs dropped, JSON serialised) and
+        add those hits to hits; then clip and redact again, since a cut can turn
+        a value a rule rejected (a run of x's, an over-long ID) into one it
+        accepts. Matches made only by the cut are not secrets, so not recorded."""
+        full = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
+        full, found = self.redact(full.replace("\r", ""))
+        if hits is not None:
+            hits += found
+        return self.clean(clip(full, n))
 
     def deep(self, value, hits):
         """Redact every string in a JSON value (tool inputs), collecting hits."""
@@ -349,8 +360,9 @@ def read_session(path: Path, cutoff: dt.datetime, red: Redactor):
             if isinstance(content, str):
                 if content.strip():
                     text, hits = red.redact(content)
+                    text = red.clip(text, TEXT_LIMIT, hits)
                     note(hits, t, label)
-                    events.append({"t": t, "kind": role, "text": red.clip(text, TEXT_LIMIT)})
+                    events.append({"t": t, "kind": role, "text": text})
                 continue
             if not isinstance(content, list):
                 continue
@@ -360,24 +372,26 @@ def read_session(path: Path, cutoff: dt.datetime, red: Redactor):
                 ct = c.get("type")
                 if ct == "text" and isinstance(c.get("text"), str) and c["text"].strip():
                     text, hits = red.redact(c["text"])
+                    text = red.clip(text, TEXT_LIMIT, hits)
                     note(hits, t, label)
-                    events.append({"t": t, "kind": role, "text": red.clip(text, TEXT_LIMIT)})
+                    events.append({"t": t, "kind": role, "text": text})
                 elif ct == "tool_use":
                     tool = red.clean(str(c.get("name")))
                     hits = []
-                    inp = red.deep(c.get("input"), hits)
+                    inp = red.clip(red.deep(c.get("input"), hits), INPUT_LIMIT, hits)
                     note(hits, t, f"tool call input ({tool})")
                     pending[c.get("id")] = len(events)
                     events.append({"t": t, "kind": "call", "tool": tool,
-                                   "input": red.clip(inp, INPUT_LIMIT)})
+                                   "input": inp})
                 elif ct == "tool_result":
                     tool = (events[pending[c["tool_use_id"]]]["tool"]
                             if c.get("tool_use_id") in pending else None)
                     txt, hits = red.redact(result_text(c.get("content")))
+                    shown = red.clip(txt, RESULT_LIMIT, hits)
                     note(hits, t, f"tool result ({tool or '?'})")
                     events.append({"t": t, "kind": "result",
                                    "error": bool(c.get("is_error")), "for": tool,
-                                   "text": red.clip(txt, RESULT_LIMIT), "_full": txt[:5000]})
+                                   "text": shown, "_full": txt[:5000]})
     return meta, events
 
 

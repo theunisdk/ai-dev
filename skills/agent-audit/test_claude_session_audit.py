@@ -266,6 +266,21 @@ class SecretsTest(unittest.TestCase):
         self.assertEqual(p.stdout.count("- SECRET-EXPOSED "), len(self.planted))
         self.assertEqual(self.fx.files(), {})
 
+    def test_output_form_secrets_are_findings(self):
+        tok = rnd(40)
+        aws = rnd(40, ALNUM + "/+")
+        self.forbidden += [tok, aws, tok[:12], aws[:12]]
+        write_session(self.fx.projects, [
+            {"type": "assistant", "timestamp": ts(5), "message": {"content": [
+                {"type": "tool_use", "id": "w", "name": "WebFetch",
+                 "input": {"headers": {"Authorization": f"Bearer {tok}"}}}]}},
+            result("w", f"[default]\r\naws_secret_access_key = {aws}\r\n")], cwd="/home/dev/crlf")
+        p = self.fx.run("--stdout", "--no-llm")
+        self.assertNoLeak(p.stdout + p.stderr)
+        self.assertEqual(p.stdout.count("- SECRET-EXPOSED "), len(self.planted) + 2, p.stdout[:3000])
+        self.assertIn("bearer-token in tool call input (WebFetch)", p.stdout)
+        self.assertIn("config-secret in tool result (WebFetch)", p.stdout)
+
     def test_no_llm_still_flags_and_alerts(self):
         p = self.fx.run("--no-llm", "--since", "1h")
         self.assertEqual(p.returncode, 2, p.stderr)
@@ -492,6 +507,15 @@ class RedactorTest(unittest.TestCase):
         self.assertRedacts(f'PASSWORD="it\'s-{pw}"', pw, "env-secret")
         self.assertRedacts(f'{{\\"Authorization\\": \\"Bearer {pw}\\"}}', pw, "bearer-token")
         self.assertRedacts(f'  "api_token": "{pw}",', pw, "config-secret")
+        for name in ("SECRET_KEY_BASE", "API_KEY_V2", "STRIPE_SECRET_KEY_LIVE", "GITHUB_TOKEN_RO",
+                     "DB_PASSWORD_PROD"):
+            self.assertRedacts(f"{name}={pw}", pw, "env-secret")
+        body = [rnd(64, ALNUM + "+/") for _ in range(2)]
+        quoted = ('key = ("-----BEGIN RSA ' + 'PRIVATE KEY-----\\n"\n'
+                  + "".join(f'       "{b}\\n"\n' for b in body)
+                  + '       "-----END RSA ' + 'PRIVATE KEY-----\\n")')
+        for b in body:
+            self.assertRedacts(quoted, b, "private-key")
 
     def test_clipping_never_trips_the_self_check(self):
         red = audit.Redactor()
@@ -505,7 +529,9 @@ class RedactorTest(unittest.TestCase):
         red = audit.Redactor()
         for text in ["a." * 100_000, "sk-" * 70_000, "\n" * 200_000, " " * 200_000,
                      ("-----BEGIN RSA " + "PRIVATE KEY-----\n") * 5000,
-                     "A_" * 100_000, "x://" * 50_000, "eyJ" * 70_000]:
+                     "A_" * 100_000, "x://" * 50_000, "eyJ" * 70_000,
+                     "-----BEGIN RSA " + "PRIVATE KEY-----\nProc-Type:" + " a:" * 60_000,
+                     "-----BEGIN RSA " + "PRIVATE KEY-----\nERROR: " + "ka: v " * 40_000]:
             t0 = time.monotonic()
             red.redact(text)
             audit.find_secrets(text)
