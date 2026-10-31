@@ -19,6 +19,7 @@ import string
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -240,6 +241,7 @@ class SecretsTest(unittest.TestCase):
         second = [l for l in lines if "(/home/dev/second)" in l]
         lines = [l for l in lines if l not in second]
         self.assertEqual(len(second), 1, second)
+        self.assertRegex(second[0], r" aws-access-key in user prompt: \[REDACTED:aws-access-key#1\]$")
         self.assertEqual(len(lines), len(self.planted), "\n".join(lines))
         got = collections.Counter(re.search(r"\) (\S+) in ", l).group(1) for l in lines)
         self.assertEqual(got, collections.Counter(k for k, _, _ in self.planted))
@@ -279,6 +281,7 @@ class SecretsTest(unittest.TestCase):
         self.assertIn("## Secrets exposed (deterministic; any one flags the run)\n- none", report)
         self.assertTrue((fx.audit / "last_run").exists())
         self.assertFalse(fx.alerts.exists())
+        self.assertNotIn("ALERT-FAILED", fx.files()["audit.log"])
 
     def test_stdout_mode_is_redacted(self):
         p = self.fx.run("--stdout", "--no-llm")
@@ -388,13 +391,17 @@ class BatchTest(unittest.TestCase):
         n = audit.BATCH_CHARS // 2 // audit.TEXT_LIMIT + 10
         body = "lorem ipsum " * (audit.TEXT_LIMIT // 12)
         entries = [user(f"{marker} {i} {body}") for i in range(n)]
-        write_session(self.fx.projects, entries, cwd=cwd)
+        sid = write_session(self.fx.projects, entries, cwd=cwd)
+        return self.fx.projects / cwd.replace("/", "-") / f"{sid}.jsonl"
 
     def run_two(self, bad_marker, bad_first):
         """Batches follow file mtime, so the session written first is batch 1."""
-        for marker, cwd in sorted([("ordinary work", "/home/dev/a"), (bad_marker, "/home/dev/b")],
-                                  key=lambda x: (x[0] == bad_marker) != bad_first):
-            self.big_session(marker, cwd)
+        now = time.time()
+        for age, (marker, cwd) in zip((120, 60), sorted(
+                [("ordinary work", "/home/dev/a"), (bad_marker, "/home/dev/b")],
+                key=lambda x: (x[0] == bad_marker) != bad_first)):
+            path = self.big_session(marker, cwd)
+            os.utime(path, (now - age, now - age))
         p = self.fx.run(STUB_MODE="flagged")
         self.assertEqual(self.fx.read(self.fx.capture).count("=====STUB-CALL====="), 2,
                          "the fixture must split into two review batches")
@@ -411,19 +418,20 @@ class BatchTest(unittest.TestCase):
         self.assertIn(f"### batch {good} of 2: FLAGGED", report)
         return report, self.fx.alert_lines(), bad
 
-    def both_orders(self, bad_marker):
+    def both_orders(self, bad_marker, check):
         for bad_first in (False, True):
             with self.subTest(bad_first=bad_first):
                 self.tearDown()
                 self.setUp()
-                yield self.run_two(bad_marker, bad_first)
+                check(*self.run_two(bad_marker, bad_first))
 
     def test_failed_batch_keeps_the_other_review(self):
-        for report, alerts, bad in self.both_orders("FAILME"):
+        def check(report, alerts, bad):
             self.assertIn(f"- batch {bad} of 2 failed: ", report)
             self.assertIn(f"### batch {bad} of 2: FAILED", report)
             self.assertEqual(len(alerts), 1)
             self.assertIn("1 HIGH, 1 BATCH-FAILED", alerts[0][0])
+        self.both_orders("FAILME", check)
 
     def test_failed_batch_error_is_redacted(self):
         leak = "sk-" + "ant-api03-" + rnd(40)
@@ -445,9 +453,10 @@ class BatchTest(unittest.TestCase):
         self.assertIn("REVIEW-FAILED (1 BATCH-FAILED)", self.fx.alert_lines()[0][0])
 
     def test_unclear_batch_is_not_hidden(self):
-        for report, alerts, bad in self.both_orders("UNCLEARME"):
+        def check(report, alerts, bad):
             self.assertIn(f"- batch {bad} of 2 came back UNCLEAR", report)
             self.assertIn("1 BATCH-UNCLEAR", alerts[0][0])
+        self.both_orders("UNCLEARME", check)
 
 
 class InstallScheduleTest(unittest.TestCase):
