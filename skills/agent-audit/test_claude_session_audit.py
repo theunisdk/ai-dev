@@ -121,7 +121,8 @@ with open(os.environ["STUB_CAPTURE"], "a") as fh:
     fh.write(data + "\n=====STUB-CALL=====\n")
 mode = os.environ.get("STUB_MODE", "clean")
 if "FAILME" in data:
-    print("boom: model unavailable", file=sys.stderr); sys.exit(1)
+    print("boom: model unavailable " + os.environ.get("STUB_LEAK", ""), file=sys.stderr)
+    sys.exit(1)
 if "UNCLEARME" in data:
     print("I could not decide."); sys.exit(0)
 if mode == "clean":
@@ -265,6 +266,43 @@ class SecretsTest(unittest.TestCase):
         self.assertEqual(p.stdout.count("- SECRET-EXPOSED "), len(self.planted))
         self.assertEqual(self.fx.files(), {})
 
+    def test_no_llm_still_flags_and_alerts(self):
+        p = self.fx.run("--no-llm", "--since", "1h")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertNoLeak(self.fx.everything(p))
+        self.assertIn(f"FLAGGED ({len(self.planted)} SECRET-EXPOSED)", self.fx.alert_lines()[0][0])
+
+    def test_begin_and_end_in_different_events_do_not_fail_closed(self):
+        begin, end = "-----BEGIN OPENSSH " + "PRIVATE KEY-----", "-----END OPENSSH " + "PRIVATE KEY-----"
+        write_session(self.fx.projects, [call("h", "head -1 ~/.ssh/id"), result("h", begin),
+                                         call("t", "tail -1 ~/.ssh/id"), result("t", end)])
+        write_session(self.fx.projects, [user(f"grep -- '{end}' x")], cwd="/home/dev/other")
+        p = self.fx.run(STUB_MODE="clean")
+        self.assertEqual(p.returncode, 2, p.stderr)
+
+    def test_error_is_redacted_and_alerts(self):
+        leak = "gh" + "p_" + rnd(36)
+        self.forbidden.append(leak)
+        bad = self.fx.root / f"audit-{leak}"
+        bad.write_text("a file, not a directory")
+        p = self.fx.run(STUB_MODE="clean", CLAUDE_AUDIT_DIR=str(bad))
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertIn("[REDACTED:github-token#1]", p.stderr)
+        self.assertNoLeak(p.stdout + p.stderr + self.fx.read(self.fx.alerts))
+        self.assertRegex(self.fx.alert_lines()[0][0], r"^Claude audit on \S+: ERROR \(see schedule.log\)$")
+
+    def test_unreadable_transcript_holds_last_run(self):
+        self.fx.audit.mkdir()
+        (self.fx.audit / "last_run").write_text(ts(30))
+        before = (self.fx.audit / "last_run").read_text()
+        write_session(self.fx.projects, [{"type": "assistant", "timestamp": ts(5), "message": {
+            "content": [{"type": "tool_use", "id": ["unhashable"], "name": "Bash", "input": {}}]}}],
+            cwd="/home/dev/broken")
+        p = self.fx.run(STUB_MODE="clean")
+        self.assertEqual(p.returncode, 3, p.stderr)
+        self.assertEqual((self.fx.audit / "last_run").read_text(), before)
+        self.assertIn("1 FILE-SKIPPED", self.fx.alert_lines()[0][0])
+
     def _assert_failed_closed(self, p, before):
         self.assertEqual(p.returncode, 3, p.stderr)
         self.assertEqual(self.fx.files(), before)
@@ -273,6 +311,7 @@ class SecretsTest(unittest.TestCase):
         alerts = self.fx.alert_lines()
         self.assertEqual(len(alerts), 1)
         self.assertRegex(alerts[0][0], r"^Claude audit on \S+: redaction self-check failed$")
+        self.assertRegex(p.stderr, r"redaction self-check failed \([a-z-]+(, [a-z-]+)* in [^)]+\)")
 
     def test_fails_closed_before_the_model_sees_a_leak(self):
         self.fx.audit.mkdir()
@@ -338,13 +377,140 @@ class BatchTest(unittest.TestCase):
         self.assertEqual(len(alerts), 1)
         self.assertIn("1 HIGH, 1 BATCH-FAILED", alerts[0][0])
 
+    def test_failed_batch_error_is_redacted(self):
+        leak = "sk-" + "ant-api03-" + rnd(40)
+        self.big_session("ordinary work", "/home/dev/a")
+        self.big_session("FAILME", "/home/dev/b")
+        p = self.fx.run(STUB_MODE="flagged", STUB_LEAK=leak)
+        self.assertEqual(p.returncode, 3, p.stderr)
+        self.assertNotIn(leak, self.fx.everything(p))
+        self.assertNotIn(leak[:12], self.fx.everything(p))
+
+    def test_all_batches_failed(self):
+        write_session(self.fx.projects, [user("FAILME please")])
+        p = self.fx.run(STUB_MODE="flagged")
+        self.assertEqual(p.returncode, 3, p.stderr)
+        self.assertEqual((self.fx.audit / "last_run").read_text(), self.last_run)
+        self.assertIn("REVIEW-FAILED (1 BATCH-FAILED)", self.fx.alert_lines()[0][0])
+
     def test_unclear_batch_is_not_hidden(self):
         report, alerts = self.run_two("UNCLEARME")
         self.assertRegex(report, r"- batch [12] of 2 came back UNCLEAR")
         self.assertIn("1 BATCH-UNCLEAR", alerts[0][0])
 
 
+class InstallScheduleTest(unittest.TestCase):
+    """install-schedule.sh wires tg-notify by absolute path into cron and launchd."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.home = self.root / "h o'me"
+        (self.home / ".claude/skills/agent-audit").mkdir(parents=True)
+        (self.home / ".claude/skills/agent-audit/claude_session_audit.py").touch()
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.tgdir = self.home / ".local/bin"
+        self.tgdir.mkdir(parents=True)
+        self.out = self.root / "tg.out"
+        self.stub(self.tgdir / "tg-notify", f'printf "%s" "$1" > {shlex.quote(str(self.out))}')
+        self.stub(self.bin / "claude", "exit 0")
+        cron = shlex.quote(str(self.root / "cron"))
+        self.stub(self.bin / "crontab", f'if [ "$1" = -l ]; then cat {cron} 2>/dev/null || '
+                  f'{{ echo "no crontab" >&2; exit 1; }}; else cat > {cron}; fi')
+        loaded = shlex.quote(str(self.root / "loaded"))
+        self.stub(self.bin / "launchctl", f'case "$1" in bootstrap) touch {loaded};; '
+                  f'bootout) rm -f {loaded};; print) [ -f {loaded} ];; esac')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def stub(self, path, body):
+        path.write_text(f"#!/bin/sh\n{body}\n")
+        path.chmod(0o755)
+
+    def install(self, with_tg=True, darwin=False):
+        if darwin:
+            self.stub(self.bin / "uname", "echo Darwin")
+        path = ([str(self.tgdir)] if with_tg else []) + [str(self.bin), "/usr/bin", "/bin"]
+        return subprocess.run(["bash", str(HERE / "install-schedule.sh")], capture_output=True,
+                              text=True, env={"HOME": str(self.home), "PATH": ":".join(path)})
+
+    def run_on_flag(self, cmd):
+        alert = "Claude audit on h: FLAGGED (1 SECRET-EXPOSED). Report: /r p/x.md"
+        line = re.sub(r"\{(alert|report|verdict)\}", lambda m: shlex.quote(alert), cmd)
+        self.assertEqual(subprocess.run(line, shell=True).returncode, 0)
+        self.assertEqual(self.out.read_text(), alert)
+
+    def test_cron(self):
+        self.home = self.root / "home"  # cron refuses a path with a quote
+        self.home.mkdir()
+        (self.home / ".claude/skills/agent-audit").mkdir(parents=True)
+        (self.home / ".claude/skills/agent-audit/claude_session_audit.py").touch()
+        self.tgdir = self.home / ".local/bin"
+        self.tgdir.mkdir(parents=True)
+        self.stub(self.tgdir / "tg-notify", f'printf "%s" "$1" > {shlex.quote(str(self.out))}')
+        p = self.install()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        line = (self.root / "cron").read_text()
+        on_flag = shlex.split(line.split(" >> ")[0])[-1]
+        self.assertEqual(on_flag, f"{self.tgdir}/tg-notify {{alert}}")
+        self.run_on_flag(on_flag)
+        p = self.install(with_tg=False)
+        self.assertIn("tg-notify not on PATH", p.stderr)
+        self.assertNotIn("--on-flag", (self.root / "cron").read_text())
+
+    def test_launchd(self):
+        import plistlib
+        p = self.install(darwin=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        plist = self.home / "Library/LaunchAgents/com.theunisdk.claude-audit.plist"
+        args = plistlib.loads(plist.read_bytes())["ProgramArguments"]
+        flags = [args[i + 1] for i, a in enumerate(args) if a == "--on-flag"]
+        self.assertEqual(len(flags), 2)
+        self.assertTrue(flags[0].startswith("osascript "))
+        self.run_on_flag(flags[1])
+        p = self.install(with_tg=False, darwin=True)
+        self.assertIn("tg-notify not on PATH", p.stderr)
+        args = plistlib.loads(plist.read_bytes())["ProgramArguments"]
+        self.assertEqual(args.count("--on-flag"), 1)
+
+
 class RedactorTest(unittest.TestCase):
+    def assertRedacts(self, text, value, kind):
+        out, hits = audit.Redactor().redact(text)
+        self.assertNotIn(value, out, text)
+        self.assertIn(kind, [k for k, _ in hits], text)
+
+    def test_more_shapes(self):
+        aws_secret = rnd(40, ALNUM + "/+")
+        self.assertRedacts(f"[default]\naws_access_key_id = AK" + "IA" + rnd(16, string.ascii_uppercase)
+                           + f"\naws_secret_access_key = {aws_secret}\n", aws_secret, "config-secret")
+        pw = rnd(20)
+        self.assertRedacts(f"PGPASSWORD={pw} psql -h db", pw, "env-secret")
+        self.assertRedacts(f'python -c "x=\\"PASSWORD=\\\"{pw}\\\"\\""', pw, "env-secret")
+        self.assertRedacts(f'PASSWORD="it\'s-{pw}"', pw, "env-secret")
+        self.assertRedacts(f'{{\\"Authorization\\": \\"Bearer {pw}\\"}}', pw, "bearer-token")
+        self.assertRedacts(f'  "api_token": "{pw}",', pw, "config-secret")
+
+    def test_clipping_never_trips_the_self_check(self):
+        red = audit.Redactor()
+        text = ("# .env.example\nOPENAI_API_KEY=sk-proj-" + "x" * 40 + "\nAWS_ID=AKIA"
+                + "Q" * 16 + "XYZ\nBOT=" + "1" * 9 + ":" + "a" * 40 + "\nDB_PASSWORD=****")
+        for n in range(1, len(text) + 1):
+            self.assertEqual(audit.find_secrets(red.clip(text, n)), [], n)
+
+    def test_no_quadratic_regexes(self):
+        import time
+        red = audit.Redactor()
+        for text in ["a." * 100_000, "sk-" * 70_000, "\n" * 200_000, " " * 200_000,
+                     ("-----BEGIN RSA " + "PRIVATE KEY-----\n") * 5000,
+                     "A_" * 100_000, "x://" * 50_000, "eyJ" * 70_000]:
+            t0 = time.monotonic()
+            red.redact(text)
+            audit.find_secrets(text)
+            self.assertLess(time.monotonic() - t0, 3, text[:20])
+
     def test_truncated_private_key(self):
         body = [rnd(64, ALNUM + "+/") for _ in range(2)]
         for sep in ("\n", "\\n"):
@@ -380,13 +546,17 @@ class RedactorTest(unittest.TestCase):
         out = audit.Redactor().clean(raw)
         self.assertEqual(audit.find_secrets(json.dumps({"command": out})), [])
 
-
+    def test_ordinary_text_left_alone(self):
         for t in ["token = getToken()", "API_KEY=$API_KEY", 'export TOKEN="${TOKEN}"',
                   "https://user:${PASS}@host/x", "postgres://u:password@localhost/db",
                   "SSH_KEY_PATH=/home/me/.ssh/id_ed25519", "task-runner-1234567890abcdefghij",
                   "git clone git@github.com:org/repo.git", "Authorization: Bearer $TOKEN",
                   "MONKEY=bananas123", "ask-question-12345678901234567890",
-                  'grep -rl -- "-----BEGIN OPENSSH ' + 'PRIVATE KEY-----" ~/.ssh']:
+                  'grep -rl -- "-----BEGIN OPENSSH ' + 'PRIVATE KEY-----" ~/.ssh',
+                  "CACHE_KEY=user-profile-v2", "REDIS_KEY_PREFIX=myapp:cache",
+                  "PUBLIC_KEY=ssh-ed25519AAAAC3", "GIT_CONFIG_KEY_0=credential.helper",
+                  "BYPASS=enabled12345", "token = self.get_token(scope)",
+                  "  password: ${DB_PASSWORD}"]:
             self.assertEqual(audit.find_secrets(t), [], t)
 
 

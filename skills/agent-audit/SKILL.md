@@ -7,12 +7,12 @@ description: Use when the user asks whether an AI agent on this machine did some
 
 The user wants to know whether any AI agent on this machine did something it shouldn't have. The extraction is done by `claude_session_audit.py` in this skill's folder, `~/.claude/skills/agent-audit/` (it also runs hourly, from launchd on macOS or cron elsewhere, and writes reports to `~/.claude-audit/reports/`).
 
-The script replaces every secret it recognises (cloud and API keys, tokens, private keys, JWTs, bearer headers, URL passwords, `.env`-style `*_SECRET/_TOKEN/_KEY/_PASSWORD=` values) with a placeholder such as `[REDACTED:github-token#2]`, the same one for the same value within a run. Each one is a `SECRET-EXPOSED` finding, listed with session, time, project, type and where it appeared; any one makes the run at least FLAGGED. Before it writes, prints or sends anything, it scans its own output again; a hit means the redaction missed something, so it writes nothing, alerts "redaction self-check failed" and exits 3. The hourly job alerts through `tg-notify` (Telegram) and, on macOS, a notification. The alert carries only the verdict, finding counts by type, the hostname and the report path.
+The script replaces every secret it recognises (cloud and API keys, tokens, private keys, JWTs, bearer headers, URL passwords, `.env`-style `*_SECRET/_TOKEN/_KEY/_PASSWORD=` values and their ini/YAML/JSON forms, such as `~/.aws/credentials`) with a placeholder such as `[REDACTED:github-token#2]`, the same one for the same value within a run. Each one is a `SECRET-EXPOSED` finding, listed with session, time, project, type and where it appeared; any one makes the run at least FLAGGED. Before it writes, prints or sends anything, it scans its own output again; a hit means the redaction missed something, so it writes nothing, alerts "redaction self-check failed" and exits 3. Its stderr (`~/.claude-audit/schedule.log` for the hourly job) names only the rule and the output it tripped in, e.g. `(env-secret in the report)`. A run that errors alerts "ERROR (see schedule.log)". The hourly job alerts through `tg-notify` (Telegram) and, on macOS, a notification. The alert carries only the verdict, finding counts by type, the hostname and the report path.
 
 ## 1. Decide what the user wants
 
 - **"Audit the last N hours / since X"** → do a fresh review (step 2).
-- **"What did the hourly audit find?" / "anything flagged?"** → read the hourly job's results instead: `tail -20 ~/.claude-audit/audit.log`, then open the most recent report(s) whose verdict is FLAGGED, CRITICAL, UNCLEAR or REVIEW-FAILED, or whose log line ends `last_run not advanced` (a review batch failed or came back unusable; the report's "Review incomplete" section says which, and the next run reviews that window again). `ALERT-FAILED` lines mean an alert command exited non-zero. Summarise those; offer to dig into any finding (step 4).
+- **"What did the hourly audit find?" / "anything flagged?"** → read the hourly job's results instead: `tail -20 ~/.claude-audit/audit.log`, then open the most recent report(s) whose verdict is FLAGGED, CRITICAL, UNCLEAR or REVIEW-FAILED, or whose log line ends `last_run not advanced` (a review batch failed or came back unusable, or a transcript could not be parsed; the report's "Review incomplete" section says which, and the next run reviews that window again). `ALERT-FAILED` lines mean an alert command exited non-zero. Summarise those; offer to dig into any finding (step 4).
 - No window given → default to the last 1 hour.
 - A project named → pass `--project <text>`.
 
@@ -24,7 +24,7 @@ If the script is missing, say so and stop: the user needs to run `./setup.sh` in
 python3 ~/.claude/skills/agent-audit/claude_session_audit.py --stdout --no-llm --since 1h
 ```
 
-(Use `python` on Windows. Change `--since` to the window: `30m`, `6h`, `2d`.) `--stdout` writes nothing to `~/.claude-audit`, so this doesn't interfere with the hourly job.
+(Use `python` on Windows. Change `--since` to the window: `30m`, `6h`, `2d`.) `--stdout` writes nothing to `~/.claude-audit`, so this doesn't interfere with the hourly job. Exit 3 with `redaction self-check failed` on stderr means it printed nothing: tell the user, quote the rule and output it names, and stop; don't read the raw transcripts to work around it.
 
 The output lists the `SECRET-EXPOSED` findings and the automatic pattern hits, then a per-session timeline: `USER` prompts, `AGENT` messages, `CALL` lines (tool + input) and `->` result previews (truncated to 300 chars). Tags like `[BLOCKED]`, `[WORKAROUND-LANGUAGE]`, `[RISKY]`, `[AFTER-BLOCK]` are cheap regex hints and often false positives.
 

@@ -30,9 +30,10 @@ Usage:
 
 Schedule it hourly with install-schedule.sh (launchd on macOS, cron elsewhere).
 
-Exit codes: 0 clean / nothing to review, 2 something flagged, 3 a review batch
-failed or was unreadable (the window is retried next run) or the redaction
-self-check failed (nothing written), 1 error.
+Exit codes: 0 clean / nothing to review, 2 something flagged, 3 the review is
+incomplete (a batch failed or came back unreadable, or a transcript was skipped;
+the window is retried next run) or the redaction self-check failed (nothing
+written), 1 error. 3 wins over 2: the report and the alert carry the verdict.
 """
 import argparse
 import datetime as dt
@@ -83,8 +84,11 @@ RISKY_RE = re.compile(
 _NOT_PLACEHOLDER = r"(?!\[REDACTED:)"
 _DUMMY_VALUES = {"pass", "password", "passwd", "pwd", "secret", "changeme", "example",
                  "token", "redacted", "none", "null", "true", "false"}
-_SECRET_NAME_PARTS = {"SECRET", "SECRETS", "TOKEN", "TOKENS", "KEY", "KEYS", "APIKEY",
-                      "PASSWORD", "PASSWD", "PASS", "PWD"}
+_NAME_SUFFIXES = ("PASSWORD", "PASSWD", "SECRET", "SECRETS", "TOKEN", "TOKENS", "APIKEY",
+                  "ACCESSKEY", "SECRETKEY", "PRIVATEKEY")
+_NAME_EXACT = {"KEY", "KEYS", "PASS", "PWD"}
+_NOT_SECRET_KEY = {"PUBLIC", "CACHE", "SORT", "PRIMARY", "FOREIGN", "PARTITION", "CONFIG",
+                   "ROUTING", "SHARD", "IDEMPOTENCY", "LOOKUP", "MAP", "HASH", "INDEX"}
 
 
 def _real_value(v, min_len):
@@ -95,16 +99,36 @@ def _real_value(v, min_len):
             and "xxxx" not in low and "****" not in low and len(set(v)) > 2)
 
 
+def _secret_name(name):
+    """The last word of the name says what it holds: DB_PASSWORD, PGPASSWORD and
+    STRIPE_KEY do; SSH_KEY_PATH, PUBLIC_KEY and CACHE_KEY don't."""
+    parts = [p for p in re.split(r"[_.\-]", name.upper()) if p and not p.isdigit()]
+    if not parts:
+        return False
+    last = parts[-1]
+    if last in _NAME_EXACT:
+        return last not in ("KEY", "KEYS") or len(parts) == 1 or parts[-2] not in _NOT_SECRET_KEY
+    return last.endswith(_NAME_SUFFIXES)
+
+
 def _env_check(m):
-    name_parts = set(m.group("name").split("_"))
-    return bool(name_parts & _SECRET_NAME_PARTS) and _real_value(m.group("v"), 8)
+    return _secret_name(m.group("name")) and _real_value(m.group("v"), 8)
+
+
+def _config_check(m):
+    v = m.group("v")
+    return (_secret_name(m.group("name")) and _real_value(v, 12)
+            and any(c.isdigit() for c in v) and any(c.isalpha() for c in v))
 
 
 SECRET_RULES = [
+    # Headers (Proc-Type: …) may precede the body; a body cut off before its END
+    # line is still a key.
     ("private-key", re.compile(
         r"-----BEGIN (?P<t>[A-Z0-9 ]*)PRIVATE KEY(?: BLOCK)?-----"
-        r"(?:.*?-----END (?P=t)PRIVATE KEY(?: BLOCK)?-----|(?:(?:\s|\\[nr])+[A-Za-z0-9+/=]{16,})+)",
-        re.S), None),
+        r"(?:(?:(?:\s|\\[nr])+[A-Za-z][A-Za-z\-]*:[ \t][^\n\\]*)*"
+        r"(?:[A-Za-z0-9+/=]|\s|\\[nr])*?-----END (?P=t)PRIVATE KEY(?: BLOCK)?-----"
+        r"|(?:(?:\s|\\[nr])+[A-Za-z0-9+/=]{16,})+)"), None),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),
      None),
     ("anthropic-key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}"), None),
@@ -119,17 +143,23 @@ SECRET_RULES = [
     ("telegram-bot-token", re.compile(r"(?<!\d)\d{8,10}:[A-Za-z0-9_\-]{35}(?![A-Za-z0-9_\-])"),
      None),
     ("bearer-token", re.compile(
-        r"(?i)\bAuthorization[\"']?\s*[:=]\s*[\"']?Bearer\s+" + _NOT_PLACEHOLDER
+        r"(?i)\bAuthorization\\?[\"']?\s*[:=]\s*\\?[\"']?Bearer\s+" + _NOT_PLACEHOLDER
         + r"(?P<v>[A-Za-z0-9._~+/\-]+=*)"),
      lambda m: _real_value(m.group("v"), 8)),
     ("url-password", re.compile(
-        r"\b[A-Za-z][A-Za-z0-9+.\-]*://[^\s/:@'\"\[\]]+:" + _NOT_PLACEHOLDER
+        r"\b[A-Za-z][A-Za-z0-9+.\-]{0,31}://[^\s/:@'\"\[\]]+:" + _NOT_PLACEHOLDER
         + r"(?P<v>[^\s/@'\"\\]+)@"),
      lambda m: _real_value(m.group("v"), 3)),
     ("env-secret", re.compile(
-        r"(?<![A-Za-z0-9_])(?P<name>[A-Z][A-Z0-9_]*)=(?P<q>[\"'])?" + _NOT_PLACEHOLDER
-        + r"(?P<v>(?(q)[^\"'\n\\]+|[^\s\"'`;&|\\]+))"),
+        r"(?<![A-Za-z0-9_])(?P<name>[A-Z][A-Z0-9_]*)=\\?(?P<q>[\"'])?" + _NOT_PLACEHOLDER
+        + r"(?P<v>(?(q)(?:(?!(?P=q))[^\n\\])+|[^\s\"'`;&|\\]+))"),
      _env_check),
+    # ini / TOML / YAML / JSON lines, e.g. ~/.aws/credentials
+    ("config-secret", re.compile(
+        r"(?m)^[ \t]*(?:export[ \t]+)?[\"']?(?P<name>[A-Za-z][A-Za-z0-9_.\-]*)[\"']?"
+        r"[ \t]*[=:][ \t]*(?P<q>[\"'])?" + _NOT_PLACEHOLDER
+        + r"(?P<v>[A-Za-z0-9/+=_\-]+)(?(q)(?P=q))[ \t]*,?[ \t]*$"),
+     _config_check),
 ]
 
 
@@ -138,8 +168,9 @@ def _span(m):
 
 
 def find_secrets(text):
-    """Every secret type a rule matches in text. The self-check: independent of
-    Redactor, so a broken redaction cannot also blind it."""
+    """Every secret type a rule matches in text: the self-check. It shares
+    SECRET_RULES with Redactor, so it guards the substitution, clipping and
+    rendering steps, not gaps in the rules themselves."""
     found = []
     for kind, rx, check in SECRET_RULES:
         if any(check is None or check(m) for m in rx.finditer(text)):
@@ -182,6 +213,11 @@ class Redactor:
     def clean(self, text):
         return self.redact(text)[0]
 
+    def clip(self, text, n):
+        """A cut can turn a value a rule rejected (a run of x's, an over-long ID)
+        into one it accepts, so the clipped text is redacted again."""
+        return self.clean(clip(self.clean(text) if isinstance(text, str) else text, n))
+
     def deep(self, value, hits):
         """Redact every string in a JSON value (tool inputs), collecting hits."""
         if isinstance(value, str):
@@ -199,10 +235,11 @@ class SelfCheckFailed(Exception):
     pass
 
 
-def guard(*texts):
+def guard(where, *texts):
     for t in texts:
-        if t and find_secrets(t):
-            raise SelfCheckFailed
+        kinds = find_secrets(t) if t else []
+        if kinds:
+            raise SelfCheckFailed(f"{', '.join(kinds)} in {where}")
 
 
 # ---------------------------------------------------------------- helpers
@@ -313,7 +350,7 @@ def read_session(path: Path, cutoff: dt.datetime, red: Redactor):
                 if content.strip():
                     text, hits = red.redact(content)
                     note(hits, t, label)
-                    events.append({"t": t, "kind": role, "text": clip(text, TEXT_LIMIT)})
+                    events.append({"t": t, "kind": role, "text": red.clip(text, TEXT_LIMIT)})
                 continue
             if not isinstance(content, list):
                 continue
@@ -324,7 +361,7 @@ def read_session(path: Path, cutoff: dt.datetime, red: Redactor):
                 if ct == "text" and isinstance(c.get("text"), str) and c["text"].strip():
                     text, hits = red.redact(c["text"])
                     note(hits, t, label)
-                    events.append({"t": t, "kind": role, "text": clip(text, TEXT_LIMIT)})
+                    events.append({"t": t, "kind": role, "text": red.clip(text, TEXT_LIMIT)})
                 elif ct == "tool_use":
                     tool = red.clean(str(c.get("name")))
                     hits = []
@@ -332,7 +369,7 @@ def read_session(path: Path, cutoff: dt.datetime, red: Redactor):
                     note(hits, t, f"tool call input ({tool})")
                     pending[c.get("id")] = len(events)
                     events.append({"t": t, "kind": "call", "tool": tool,
-                                   "input": clip(inp, INPUT_LIMIT)})
+                                   "input": red.clip(inp, INPUT_LIMIT)})
                 elif ct == "tool_result":
                     tool = (events[pending[c["tool_use_id"]]]["tool"]
                             if c.get("tool_use_id") in pending else None)
@@ -340,11 +377,11 @@ def read_session(path: Path, cutoff: dt.datetime, red: Redactor):
                     note(hits, t, f"tool result ({tool or '?'})")
                     events.append({"t": t, "kind": "result",
                                    "error": bool(c.get("is_error")), "for": tool,
-                                   "text": clip(txt, RESULT_LIMIT), "_full": txt[:5000]})
+                                   "text": red.clip(txt, RESULT_LIMIT), "_full": txt[:5000]})
     return meta, events
 
 
-def flag_events(events):
+def flag_events(events, red):
     """Pattern checks. Mutates events with a 'flags' list, returns flag summaries."""
     flags = []
     after_block = 0
@@ -368,7 +405,7 @@ def flag_events(events):
             ev["flags"] = f
             if f != ["error"]:
                 flags.append((ev["t"], f, ev.get("tool") or ev["kind"],
-                              clip(ev.get("input") or ev.get("text", ""), 160)))
+                              red.clip(ev.get("input") or ev.get("text", ""), 160)))
     return flags
 
 
@@ -445,7 +482,7 @@ def run_review(text, model, claude_bin):
                        text=True, timeout=900, env=env, cwd=str(state_dir()))
     if p.returncode != 0:
         raise RuntimeError(f"claude exited {p.returncode}: "
-                           f"{(p.stderr.strip() or p.stdout.strip())[:500]}")
+                           f"{p.stderr.strip() or p.stdout.strip()}")
     return p.stdout.strip()
 
 
@@ -512,14 +549,13 @@ def fire_alerts(commands, values):
     return problems
 
 
-def fail_closed(args, host):
+def fail_closed(args, host, detail):
     """The redaction self-check found a secret in the output: write nothing."""
-    print("ERROR: redaction self-check failed; nothing written", file=sys.stderr)
-    if args.on_flag:
-        for p in fire_alerts(args.on_flag, {
-                "alert": f"Claude audit on {host}: redaction self-check failed",
-                "verdict": "SELF-CHECK-FAILED", "report": "(none written)"}):
-            print(f"ERROR: {p}", file=sys.stderr)
+    print(f"ERROR: redaction self-check failed ({detail}); nothing written", file=sys.stderr)
+    for p in fire_alerts(args.on_flag, {
+            "alert": f"Claude audit on {host}: redaction self-check failed",
+            "verdict": "SELF-CHECK-FAILED", "report": "(none written)"}):
+        print(f"ERROR: {p}", file=sys.stderr)
     return 3
 
 
@@ -535,36 +571,40 @@ def main():
     ap.add_argument("--stdout", action="store_true", help="print timeline instead of saving")
     ap.add_argument("--project", help="only sessions whose folder/cwd contains this text")
     ap.add_argument("--on-flag", action="append", default=[],
-                    help="shell command to run when flagged, a review batch failed or the "
-                    "self-check failed; repeatable. {alert} = one-line alert (verdict, "
-                    "finding counts, host, report path), {report} = report path, "
-                    "{verdict} = verdict")
+                    help="shell command to run when flagged, the review is incomplete, the "
+                    "self-check failed or the run errored; repeatable. {alert} = one-line "
+                    "alert (verdict, finding counts, host, report path), {report} = report "
+                    "path, {verdict} = verdict")
     args = ap.parse_args()
     host = socket.gethostname()
     red = Redactor()
     try:
-        return run(args, red, host)
-    except SelfCheckFailed:
-        return fail_closed(args, host)
+        rc = run(args, red, host)
+    except SelfCheckFailed as ex:
+        return fail_closed(args, host, ex)
     except Exception:
         msg = red.clean(traceback.format_exc())
         try:
-            guard(msg)
+            guard("error message", msg)
         except SelfCheckFailed:
             msg = "(details withheld: they failed the redaction self-check)"
         print(f"ERROR: {msg}", file=sys.stderr)
-        return 1
+        rc = 1
+    if rc == 1:
+        for p in fire_alerts(args.on_flag, {
+                "alert": f"Claude audit on {host}: ERROR (see schedule.log)",
+                "verdict": "ERROR", "report": "(none written)"}):
+            print(f"ERROR: {p}", file=sys.stderr)
+    return rc
 
 
 def run(args, red, host):
     now = dt.datetime.now(dt.timezone.utc)
-    use_state = not args.since and not args.stdout and not args.no_llm
+    use_state = not (args.since or args.stdout or args.no_llm or args.project)
     notes = []
     sd = None if args.stdout else state_dir()
     state_file = sd / "last_run" if sd else None
-    if args.since:
-        cutoff = now - parse_window(args.since)
-    elif use_state and state_file.exists():
+    if use_state and state_file.exists():
         cutoff = parse_ts(state_file.read_text().strip())
         if cutoff is None:
             cutoff = now - dt.timedelta(hours=1)
@@ -574,12 +614,12 @@ def run(args, red, host):
                          "never reviewed")
             cutoff = now - MAX_WINDOW
     else:
-        cutoff = now - dt.timedelta(hours=1)
+        cutoff = now - (parse_window(args.since) if args.since else dt.timedelta(hours=1))
 
     projects = config_dir() / "projects"
     if not projects.is_dir() or not os.access(projects, os.R_OK | os.X_OK):
         msg = red.clean(f"cannot read transcripts at {projects}")
-        guard(msg)
+        guard("error message", msg)
         if sd:
             with (sd / "audit.log").open("a") as fh:
                 fh.write(f"{now.isoformat()} ERROR {msg}\n")
@@ -595,18 +635,20 @@ def run(args, red, host):
             files.append((mtime, f))
     files = [f for _, f in sorted(files)]
 
+    # (kind, text): anything that leaves the window not fully reviewed
+    problems = []
     sections, all_flags, exposed = [], [], []
     for f in files:
         try:
             meta, events = read_session(f, cutoff, red)
         except Exception as ex:
-            notes.append(red.clean(f"skipped {f}: {ex!r}"))
+            problems.append(("FILE-SKIPPED", red.clip(f"transcript skipped: {f}: {ex!r}", 500)))
             continue
         if not events:
             continue
         if args.project and args.project.lower() not in (str(f) + str(meta["cwd"])).lower():
             continue
-        fl = flag_events(events)
+        fl = flag_events(events, red)
         all_flags += [(meta["session"], meta["cwd"]) + x for x in fl]
         exposed += [dict(x, session=meta["session"], cwd=meta["cwd"]) for x in meta["exposed"]]
         sections.append(render(meta, events))
@@ -626,17 +668,17 @@ def run(args, red, host):
     timeline = "\n".join(sections)
 
     if args.stdout:
-        out = (header + secret_block + "\n" + flag_block + "\n\n## Timeline\n"
-               + (timeline or "(no activity)"))
-        guard(out)
+        out = (header + "".join(f"problem: {t}\n" for _, t in problems) + secret_block
+               + "\n" + flag_block + "\n\n## Timeline\n" + (timeline or "(no activity)"))
+        guard("--stdout output", out)
         print(out)
-        return 0
+        return 3 if problems else 0
 
     log = sd / "audit.log"
-    if not sections:
+    if not sections and not problems:
         line = (f"{now.isoformat()} no activity since {cutoff.isoformat()} "
                 f"(files={len(files)})" + "".join(f"; {n}" for n in notes) + "\n")
-        guard(line)
+        guard("audit.log", line)
         prune_reports(sd, now)
         with log.open("a") as fh:
             fh.write(line)
@@ -649,18 +691,19 @@ def run(args, red, host):
     timeline_file = report.with_name(stamp + "_timeline.md")
     timeline_doc = header + timeline
 
-    verdict, review, problems, counts = "UNREVIEWED", "(model review skipped: --no-llm)", [], {}
-    if not args.no_llm:
+    verdict, review, counts = "UNREVIEWED", "(model review skipped: --no-llm)", {}
+    if not args.no_llm and sections:
         batches = batch(sections)
-        guard(timeline_doc, *batches)  # before anything leaves for the model
+        guard("the model input", timeline_doc, *batches)
         verdicts, parts, n = [], [], len(batches)
         for i, b in enumerate(batches, 1):
             name = f"batch {i} of {n}"
             try:
                 raw = run_review(b, args.model, args.claude_bin)
             except Exception as ex:
-                problems.append(f"{name} failed: {red.clean(str(ex))}")
-                parts.append(f"### {name}: FAILED\n{red.clean(str(ex))}")
+                err = red.clip(str(ex), 500)
+                problems.append(("BATCH-FAILED", f"{name} failed: {err}"))
+                parts.append(f"### {name}: FAILED\n{err}")
                 continue
             v = verdict_of(raw)
             text = red.clean(raw)
@@ -668,13 +711,15 @@ def run(args, red, host):
             for sev, c in severity_counts(text).items():
                 counts[sev] = counts.get(sev, 0) + c
             if v == "UNCLEAR":
-                problems.append(f"{name} came back UNCLEAR (no VERDICT line)")
+                problems.append(("BATCH-UNCLEAR", f"{name} came back UNCLEAR (no VERDICT line)"))
             parts.append(f"### {name}: {v}\n{text}")
         verdict = max(verdicts + (["REVIEW-FAILED"] if len(verdicts) < n else []),
                       key=RANK.index)
         review = "\n\n---\n\n".join(parts)
-        if problems:  # a window with a gap in its review is retried next run
-            use_state = False
+    elif not sections:
+        review = "(nothing to review)"
+    if problems:  # a window with a gap in its review is retried next run
+        use_state = False
     if exposed:
         verdict = max(verdict, "FLAGGED", key=RANK.index)
 
@@ -684,18 +729,15 @@ def run(args, red, host):
     for sev in SEVERITIES + ("OTHER",):
         if counts.get(sev):
             alert_counts[sev] = counts[sev]
-    failed_n = sum("failed:" in p for p in problems)
-    if failed_n:
-        alert_counts["BATCH-FAILED"] = failed_n
-    if len(problems) - failed_n:
-        alert_counts["BATCH-UNCLEAR"] = len(problems) - failed_n
+    for kind, _ in problems:
+        alert_counts[kind] = alert_counts.get(kind, 0) + 1
     count_text = ", ".join(f"{c} {k}" for k, c in alert_counts.items())
 
     problem_block = ""
     if problems:
         problem_block = ("\n## Review incomplete: last_run not advanced, so this window "
                          "is reviewed again next run\n"
-                         + "".join(f"- {p}\n" for p in problems))
+                         + "".join(f"- {t}\n" for _, t in problems))
     report_doc = (f"{header}\n**VERDICT: {verdict}**  (model: {args.model})"
                   + (f"  |  {count_text}" if count_text else "") + "\n"
                   + problem_block + secret_block + "\n\n"
@@ -703,13 +745,17 @@ def run(args, red, host):
                   f"Full timeline: {timeline_file}\n")
     log_line = (f"{now.isoformat()} {verdict} sessions={len(sections)} "
                 f"hits={len(all_flags)} secrets={len(exposed)} "
-                f"batch_problems={len(problems)} report={report}"
+                f"problems={len(problems)} report={report}"
                 + "".join(f"; {n}" for n in notes)
                 + ("; last_run not advanced" if problems else "") + "\n")
     stdout_line = f"{verdict}: {report}"
     alert = (f"Claude audit on {host}: {verdict}" + (f" ({count_text})" if count_text else "")
              + f". Report: {report}")
-    guard(timeline_doc, report_doc, log_line, stdout_line, alert)
+    guard("the timeline", timeline_doc)
+    guard("the report", report_doc)
+    guard("audit.log", log_line)
+    guard("stdout", stdout_line)
+    guard("the alert", alert)
 
     prune_reports(sd, now)
     timeline_file.write_text(timeline_doc, encoding="utf-8")
@@ -722,16 +768,15 @@ def run(args, red, host):
     flagged = verdict in ("FLAGGED", "CRITICAL") or \
         (verdict == "UNREVIEWED" and any("BLOCKED" in x[3] or "AFTER-BLOCK" in x[3]
                                          for x in all_flags))
-    incomplete = bool(problems)
     print(stdout_line)
-    if (flagged or incomplete) and args.on_flag:
+    if flagged or problems:
         alert_problems = fire_alerts(args.on_flag, {"alert": alert, "report": str(report),
                                                     "verdict": verdict})
         if alert_problems:
             with log.open("a") as fh:
                 fh.write("".join(f"{now.isoformat()} ALERT-FAILED {p} report={report}\n"
                                  for p in alert_problems))
-    return 3 if incomplete else 2 if flagged else 0
+    return 3 if problems else 2 if flagged else 0
 
 
 def prune_reports(sd, now):
