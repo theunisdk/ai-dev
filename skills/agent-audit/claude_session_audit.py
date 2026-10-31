@@ -111,6 +111,8 @@ def _secret_name(name):
     if not parts:
         return False
     last = parts[-1]
+    if last.endswith("TOKEN") and re.search(r"PAGE|NEXT|CONTINUATION|CURSOR|SYNC", "".join(parts)):
+        return False
     if last in _NAME_EXACT:
         return last not in ("KEY", "KEYS") or len(parts) == 1 or parts[-2] not in _NOT_SECRET_KEY
     return last.endswith(_NAME_SUFFIXES)
@@ -131,9 +133,9 @@ SECRET_RULES = [
     # line is still a key.
     ("private-key", re.compile(
         r"-----BEGIN (?P<t>[A-Z0-9 ]*)PRIVATE KEY(?: BLOCK)?-----"
-        r"(?:(?:(?:\r?\n|(?:\\r)?\\n)[ \t]*[A-Za-z][A-Za-z\-]*:[ \t][^\n\\]*)*"
+        r"(?:(?:(?:\r?\n|(?:\\r)?\\n)[ \t]*[A-Za-z][A-Za-z\-]*:[ \t][^\r\n\\]*(?=\r?\n|(?:\\r)?\\n)){0,4}"
         r"(?:[A-Za-z0-9+/=\"',]|\s|\\[nr])*?-----END (?P=t)PRIVATE KEY(?: BLOCK)?-----"
-        r"|(?:(?:\s|\\[nr])+[A-Za-z0-9+/=]{16,})+)"), None),
+        r"|(?:(?:\s|\\[nr]|[\"',])+[A-Za-z0-9+/=]{16,})+)"), None),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),
      None),
     ("anthropic-key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}"), None),
@@ -163,7 +165,7 @@ SECRET_RULES = [
     ("config-secret", re.compile(
         r"(?m)^[ \t]*(?:export[ \t]+)?[\"']?(?P<name>[A-Za-z][A-Za-z0-9_.\-]*)[\"']?"
         r"[ \t]*[=:][ \t]*(?P<q>[\"'])?" + _NOT_PLACEHOLDER
-        + r"(?P<v>[A-Za-z0-9/+=_\-]+)(?(q)(?P=q))[ \t]*,?[ \t]*$"),
+        + r"(?P<v>[A-Za-z0-9/+=_\-]+)(?(q)(?P=q))[ \t]*(?:,[ \t]*)?$"),
      _config_check),
 ]
 
@@ -229,16 +231,21 @@ class Redactor:
             hits += found
         return self.clean(clip(full, n))
 
-    def deep(self, value, hits):
-        """Redact every string in a JSON value (tool inputs), collecting hits."""
+    def deep(self, value, hits, key=None):
+        """Redact every string in a JSON value (tool inputs), collecting hits. A
+        string under a secret-named key ({"password": …}) is a secret whatever it
+        looks like."""
         if isinstance(value, str):
             out, h = self.redact(value)
+            if not h and isinstance(key, str) and _secret_name(key) and _real_value(value, 8):
+                out = self._placeholder("config-secret", value)
+                h = [("config-secret", out)]
             hits += h
             return out
         if isinstance(value, list):
             return [self.deep(v, hits) for v in value]
         if isinstance(value, dict):
-            return {self.deep(k, hits): self.deep(v, hits) for k, v in value.items()}
+            return {self.deep(k, hits): self.deep(v, hits, k) for k, v in value.items()}
         return value
 
 

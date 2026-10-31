@@ -516,6 +516,23 @@ class RedactorTest(unittest.TestCase):
                   + '       "-----END RSA ' + 'PRIVATE KEY-----\\n")')
         for b in body:
             self.assertRedacts(quoted, b, "private-key")
+        head = 'KEY = ("-----BEGIN RSA ' + 'PRIVATE KEY-----\\n"\n' + "".join(f'  "{b}\\n"\n' for b in body)
+        for b in body:
+            self.assertRedacts(head, b, "private-key")
+        crlf = ("-----BEGIN RSA " + "PRIVATE KEY-----\r\nProc-Type: 4,ENCRYPTED\r\n"
+                "DEK-Info: AES-128-CBC,0A1B\r\n\r\n" + "\r\n".join(body)
+                + "\r\n-----END RSA " + "PRIVATE KEY-----\r\n")
+        for b in body:
+            self.assertRedacts(crlf, b, "private-key")
+
+    def test_secret_named_dict_values(self):
+        pw = rnd(14)
+        hits = []
+        out = audit.Redactor().deep({"user": "app", "password": pw, "opts": [{"apiKey": pw + "x"}],
+                                     "pageToken": rnd(20), "nextPageToken": rnd(20)}, hits)
+        self.assertNotIn(pw, json.dumps(out))
+        self.assertEqual([k for k, _ in hits], ["config-secret", "config-secret"])
+        self.assertEqual(out["user"], "app")
 
     def test_clipping_never_trips_the_self_check(self):
         red = audit.Redactor()
@@ -523,6 +540,35 @@ class RedactorTest(unittest.TestCase):
                 + "Q" * 16 + "XYZ\nBOT=" + "1" * 9 + ":" + "a" * 40 + "\nDB_PASSWORD=****")
         for n in range(1, len(text) + 1):
             self.assertEqual(audit.find_secrets(red.clip(text, n)), [], n)
+
+    def test_every_rule_is_fast_on_one_adversarial_megabyte(self):
+        import time
+        begin = "-----BEGIN RSA " + "PRIVATE KEY-----"
+        segments = [
+            begin + "\r\n" + "Proc-Type: a\r\n" * 7000,
+            begin + "\\r\\n" + "Proc-Type: a\\r\\n" * 5000,
+            ("X: " + begin + "\n") * 3000,
+            ("X: " + begin + "\\n") * 3000,
+            begin + "\nERROR: " + "ka: v " * 16000,
+            begin + "\n" + '"' * 50_000 + "," * 50_000,
+            begin + "\n" + ("'" + "A" * 15 + "'\n") * 5000,
+            "password: abc123def456ghi" + " " * 100_000 + "x",
+            "  token = " + "a1" * 50_000 + " x",
+            "a." * 50_000, "sk-" * 33_000, "x://" * 25_000, "A_" * 50_000,
+            "Authorization: Bearer " * 5000, "user:pass@" * 10_000, "1234567890:" * 9000,
+        ]
+        corpus = "\n".join(segments)
+        self.assertGreater(len(corpus), 1_000_000)
+        def every_rule():
+            for _, rx, _ in audit.SECRET_RULES:
+                for _ in rx.finditer(corpus):
+                    pass
+        for name, run in (("every rule", every_rule),
+                          ("redact", lambda: audit.Redactor().redact(corpus)),
+                          ("self-check", lambda: audit.find_secrets(corpus))):
+            t0 = time.monotonic()
+            run()
+            self.assertLess(time.monotonic() - t0, 2.0, name)
 
     def test_no_quadratic_regexes(self):
         import time
