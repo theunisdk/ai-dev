@@ -501,6 +501,8 @@ class RedactorTest(unittest.TestCase):
         aws_secret = rnd(40, ALNUM + "/+")
         self.assertRedacts(f"[default]\naws_access_key_id = AK" + "IA" + rnd(16, string.ascii_uppercase)
                            + f"\naws_secret_access_key = {aws_secret}\n", aws_secret, "config-secret")
+        aws_secret = "/" + rnd(39, ALNUM + "/+")
+        self.assertRedacts(f"aws_secret_access_key = {aws_secret}\n", aws_secret, "config-secret")
         pw = rnd(20)
         self.assertRedacts(f"PGPASSWORD={pw} psql -h db", pw, "env-secret")
         self.assertRedacts(f'python -c "x=\\"PASSWORD=\\\"{pw}\\\"\\""', pw, "env-secret")
@@ -529,10 +531,36 @@ class RedactorTest(unittest.TestCase):
         pw = rnd(14)
         hits = []
         out = audit.Redactor().deep({"user": "app", "password": pw, "opts": [{"apiKey": pw + "x"}],
-                                     "pageToken": rnd(20), "nextPageToken": rnd(20)}, hits)
+                                     "api_key": pw + "y", "pageToken": rnd(20),
+                                     "nextPageToken": rnd(20)}, hits)
         self.assertNotIn(pw, json.dumps(out))
-        self.assertEqual([k for k, _ in hits], ["config-secret", "config-secret"])
+        self.assertEqual([k for k, _ in hits], ["config-secret"] * 3)
         self.assertEqual(out["user"], "app")
+        ordinary = {"key": "ArrowDown", "keys": "Control+a", "issue_key": "PROJ-1234",
+                    "Key": "src/app.py", "s3_key": "reports/q3.csv", "token_type": "bearer"}
+        hits = []
+        self.assertEqual(audit.Redactor().deep(ordinary, hits), ordinary)
+        self.assertEqual(hits, [])
+
+    def test_secret_names_next_to_pagination(self):
+        for name in ("GH_PAGES_TOKEN", "CURSOR_API_TOKEN", "NEXTCLOUD_TOKEN", "ASYNC_WORKER_TOKEN"):
+            self.assertTrue(audit._secret_name(name), name)
+        for name in ("pageToken", "nextPageToken", "NEXT_PAGE_TOKEN", "continuationToken"):
+            self.assertFalse(audit._secret_name(name), name)
+
+    def test_headered_key_without_end(self):
+        body = [rnd(64, ALNUM + "+/") for _ in range(3)]
+        heads = ["Proc-Type: 4,ENCRYPTED", "DEK-Info: AES-128-CBC,0A1B2C", "Comment: a", "Comment: b",
+                 "Comment: c", "Version: x"]
+        for n in (1, 2, 6):
+            for nl in ("\n", "\r\n", "\\n", "\\r\\n"):
+                text = (("-----BEGIN RSA " + "PRIVATE KEY-----") + nl + nl.join(heads[:n]) + nl + nl
+                        + nl.join(body))
+                for b in body:
+                    self.assertRedacts(text, b, "private-key")
+                for end in ("", nl + "-----END RSA " + "PRIVATE KEY-----"):
+                    out, _ = audit.Redactor().redact(text + end)
+                    self.assertTrue(all(b[:12] not in out for b in body), (n, nl, end))
 
     def test_clipping_never_trips_the_self_check(self):
         red = audit.Redactor()
@@ -541,24 +569,32 @@ class RedactorTest(unittest.TestCase):
         for n in range(1, len(text) + 1):
             self.assertEqual(audit.find_secrets(red.clip(text, n)), [], n)
 
-    def test_every_rule_is_fast_on_one_adversarial_megabyte(self):
+    def test_every_rule_is_fast_on_adversarial_input(self):
+        for mb in (0.5, 1, 2):
+            with self.subTest(mb=mb):
+                self._time_corpus(mb)
+
+    def _time_corpus(self, mb):
         import time
+        k = mb / 1.5  # the base corpus is about 1.5MB
+        n = lambda x: max(1, int(x * k))
         begin = "-----BEGIN RSA " + "PRIVATE KEY-----"
         segments = [
-            begin + "\r\n" + "Proc-Type: a\r\n" * 7000,
-            begin + "\\r\\n" + "Proc-Type: a\\r\\n" * 5000,
-            ("X: " + begin + "\n") * 3000,
-            ("X: " + begin + "\\n") * 3000,
-            begin + "\nERROR: " + "ka: v " * 16000,
-            begin + "\n" + '"' * 50_000 + "," * 50_000,
-            begin + "\n" + ("'" + "A" * 15 + "'\n") * 5000,
-            "password: abc123def456ghi" + " " * 100_000 + "x",
-            "  token = " + "a1" * 50_000 + " x",
-            "a." * 50_000, "sk-" * 33_000, "x://" * 25_000, "A_" * 50_000,
-            "Authorization: Bearer " * 5000, "user:pass@" * 10_000, "1234567890:" * 9000,
+            begin + "\r\n" + "Proc-Type: a\r\n" * n(7000),
+            begin + "\\r\\n" + "Proc-Type: a\\r\\n" * n(5000),
+            ("X: " + begin + "\n") * n(3000),
+            ("X: " + begin + "\\n") * n(3000),
+            ("X: " + begin + "\nComment: c\n") * n(2000),
+            begin + "\nERROR: " + "ka: v " * n(16000),
+            begin + "\n" + '"' * n(50_000) + "," * n(50_000),
+            begin + "\n" + ("'" + "A" * 15 + "'\n") * n(5000),
+            "password: abc123def456ghi" + " " * n(100_000) + "x",
+            "  token = " + "a1" * n(50_000) + " x",
+            "a." * n(50_000), "sk-" * n(33_000), "x://" * n(25_000), "A_" * n(50_000),
+            "Authorization: Bearer " * n(5000), "user:pass@" * n(10_000), "1234567890:" * n(9000),
         ]
         corpus = "\n".join(segments)
-        self.assertGreater(len(corpus), 1_000_000)
+        self.assertGreater(len(corpus), mb * 900_000)
         def every_rule():
             for _, rx, _ in audit.SECRET_RULES:
                 for _ in rx.finditer(corpus):

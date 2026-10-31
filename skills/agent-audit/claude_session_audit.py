@@ -111,7 +111,7 @@ def _secret_name(name):
     if not parts:
         return False
     last = parts[-1]
-    if last.endswith("TOKEN") and re.search(r"PAGE|NEXT|CONTINUATION|CURSOR|SYNC", "".join(parts)):
+    if re.search(r"(?:NEXT)?(?:PAGE|CONTINUATION|CURSOR|SYNC)TOKEN$", "".join(parts)):
         return False
     if last in _NAME_EXACT:
         return last not in ("KEY", "KEYS") or len(parts) == 1 or parts[-2] not in _NOT_SECRET_KEY
@@ -124,7 +124,7 @@ def _env_check(m):
 
 def _config_check(m):
     v = m.group("v")
-    return (_secret_name(m.group("name")) and _real_value(v, 12)
+    return (_secret_name(m.group("name")) and _real_value(v.lstrip("/"), 12)
             and any(c.isdigit() for c in v) and any(c.isalpha() for c in v))
 
 
@@ -133,8 +133,8 @@ SECRET_RULES = [
     # line is still a key.
     ("private-key", re.compile(
         r"-----BEGIN (?P<t>[A-Z0-9 ]*)PRIVATE KEY(?: BLOCK)?-----"
-        r"(?:(?:(?:\r?\n|(?:\\r)?\\n)[ \t]*[A-Za-z][A-Za-z\-]*:[ \t][^\r\n\\]*(?=\r?\n|(?:\\r)?\\n)){0,4}"
-        r"(?:[A-Za-z0-9+/=\"',]|\s|\\[nr])*?-----END (?P=t)PRIVATE KEY(?: BLOCK)?-----"
+        r"(?:(?:\r?\n|(?:\\r)?\\n)[ \t]*[A-Za-z][A-Za-z\-]*:[ \t][^\r\n\\]*(?=\r?\n|(?:\\r)?\\n)){0,6}"
+        r"(?:(?:[A-Za-z0-9+/=\"',]|\s|\\[nr])*?-----END (?P=t)PRIVATE KEY(?: BLOCK)?-----"
         r"|(?:(?:\s|\\[nr]|[\"',])+[A-Za-z0-9+/=]{16,})+)"), None),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),
      None),
@@ -237,7 +237,9 @@ class Redactor:
         looks like."""
         if isinstance(value, str):
             out, h = self.redact(value)
-            if not h and isinstance(key, str) and _secret_name(key) and _real_value(value, 8):
+            if (not h and isinstance(key, str) and _secret_name(key) and _real_value(value, 8)
+                    and re.search(r"PASSWORD|PASSWD|SECRET|TOKEN|APIKEY",
+                                  re.sub(r"[_.\-]", "", key.upper()))):
                 out = self._placeholder("config-secret", value)
                 h = [("config-secret", out)]
             hits += h
