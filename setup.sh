@@ -2,9 +2,9 @@
 # Machine setup for this toolkit: symlink every skill in skills/ into ~/.claude/skills
 # so Claude Code discovers them, schedule the hourly agent audit, and install every mod
 # in mods/ from this checkout's marketplace (.claude-plugin/marketplace.json). Claude
-# Code reads those mods in place
-# from the checkout, so a pull updates them. Idempotent — run it after every pull
-# that adds a skill or mod; existing correct links are just refreshed.
+# Code reads those mods in place from the checkout, so a pull updates them.
+# Idempotent — run it after every pull that adds a skill or mod; existing correct
+# links are just refreshed.
 #
 #   git clone git@github.com:theunisdk/ai-dev.git && cd ai-dev && ./setup.sh
 set -uo pipefail
