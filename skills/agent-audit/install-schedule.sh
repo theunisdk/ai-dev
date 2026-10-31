@@ -64,8 +64,23 @@ fi
 PY="$("$PY" -c 'import sys; print(sys.executable)')"
 mkdir -p "$AUDIT_DIR"
 
+# The Telegram alert, by absolute path: the job's PATH is minimal.
+TG="$(command -v tg-notify || true)"
+case "$TG" in
+  "") echo "  ! audit schedule: tg-notify not on PATH — installing without the Telegram alert" >&2 ;;
+  /*) ;;
+  *) echo "  ! audit schedule: tg-notify is not a file on PATH ($TG) — installing without the Telegram alert" >&2
+     TG="" ;;
+esac
+
 if [ "$(uname)" = "Darwin" ]; then
+  shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
   xml() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+  tg_args=""
+  if [ -n "$TG" ]; then
+    tg_args="
+    <string>--on-flag</string><string>$(xml "$(shq "$TG")") {alert}</string>"
+  fi
   new="$(cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -78,7 +93,7 @@ if [ "$(uname)" = "Darwin" ]; then
     <string>$(xml "$SCRIPT")</string>
     <string>--claude-bin</string><string>$(xml "$CLAUDE")</string>
     <string>--on-flag</string>
-    <string>osascript -e "display notification \"Hourly agent audit: {verdict}. Ask Claude what the audit found.\" with title \"Claude audit\""</string>
+    <string>osascript -e "display notification \"Hourly agent audit: {verdict}. Ask Claude what the audit found.\" with title \"Claude audit\""</string>$tg_args
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -110,6 +125,12 @@ EOF
   fi
   echo "  ✓ audit schedule: launchd $LABEL, hourly"
 else
+  if [ -n "$TG" ] && ! printf '%s' "$TG" | grep -Eq '^[A-Za-z0-9_./+-]+$'; then
+    echo "  ! audit schedule: cron can't safely quote the tg-notify path $TG — installing without the Telegram alert" >&2
+    TG=""
+  fi
+  on_flag=""
+  [ -z "$TG" ] || on_flag=" --on-flag '$TG {alert}'"
   for p in "$PY" "$SCRIPT" "$CLAUDE" "$AUDIT_DIR"; do
     case "$p" in *[\'%]*)
       echo "  ! audit schedule: cron can't take a path with ' or %: $p — not installed" >&2
@@ -117,7 +138,7 @@ else
     esac
   done
   current="$(read_crontab)"
-  line="0 * * * * PATH='$(dirname "$CLAUDE")':/usr/local/bin:/usr/bin:/bin CLAUDE_AUDIT_DIR='$AUDIT_DIR' '$PY' '$SCRIPT' --claude-bin '$CLAUDE' >> '$AUDIT_DIR/schedule.log' 2>&1 $CRON_TAG"
+  line="0 * * * * PATH='$(dirname "$CLAUDE")':/usr/local/bin:/usr/bin:/bin CLAUDE_AUDIT_DIR='$AUDIT_DIR' '$PY' '$SCRIPT' --claude-bin '$CLAUDE'$on_flag >> '$AUDIT_DIR/schedule.log' 2>&1 $CRON_TAG"
   if [ -n "$current" ]; then
     printf '%s\n%s\n' "$current" "$line" | crontab -
   else
