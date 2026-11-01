@@ -126,7 +126,11 @@ if "FAILME" in data:
     sys.exit(1)
 if "UNCLEARME" in data:
     print("I could not decide."); sys.exit(0)
-if mode == "clean":
+if "NOSEVME" in data:
+    print("VERDICT: FLAGGED\nsomething is off\n- 12:00 agent did X, no severity given"); sys.exit(0)
+if mode == "raw":
+    print(os.environ["STUB_REVIEW"])
+elif mode == "clean":
     print("VERDICT: CLEAN\nMODEL-MARKER nothing to see")
 elif mode == "leak":
     print("VERDICT: FLAGGED\n- [HIGH] quoting " + os.environ["STUB_LEAK"])
@@ -462,6 +466,30 @@ class BatchTest(unittest.TestCase):
         self.both_orders("UNCLEARME", check)
 
 
+    def test_low_only_batch_does_not_hide_another_batch(self):
+        """Counts are summed over batches; a LOW-only batch must not quiet a FLAGGED
+        batch whose severity didn't parse, nor one that failed."""
+        for marker, rc, want in (("NOSEVME", 2, "FLAGGED (2 LOW)"),
+                                 ("FAILME", 3, "FLAGGED (2 LOW, 1 BATCH-FAILED)")):
+            with self.subTest(marker=marker):
+                self.tearDown()
+                self.setUp()
+                self.big_session("ordinary work", "/home/dev/a")
+                self.big_session(marker, "/home/dev/b")
+                p = self.fx.run(STUB_MODE="raw", STUB_REVIEW=LOW_REVIEW)
+                self.assertEqual(p.returncode, rc, p.stderr)
+                [alert] = self.fx.alert_lines()
+                self.assertIn(want, alert[0])
+
+    def test_low_only_batches_send_nothing(self):
+        self.big_session("ordinary work", "/home/dev/a")
+        self.big_session("more work", "/home/dev/b")
+        p = self.fx.run(STUB_MODE="raw", STUB_REVIEW=LOW_REVIEW)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertEqual(self.fx.read(self.fx.capture).count("=====STUB-CALL====="), 2)
+        self.assertFalse(self.fx.alerts.exists())
+
+
 class AlertVolumeTest(unittest.TestCase):
     """Issue #29: an allowlist for fixture sessions, and one alert per secret per day."""
 
@@ -689,6 +717,137 @@ class AlertVolumeTest(unittest.TestCase):
             f.mkdir()
         self.assert_alerts_twice_with_note(broken, "alert history unreadable")
         self.assertIn("DEDUPE-FAILED", self.log())
+
+
+LOW_FINDINGS = """- [LOW] 12:00, session abc, proj — agent deleted a branch with -D
+  evidence: `CALL Bash: git branch -D x`
+
+- [LOW] 12:05, session abc, proj — agent probed a production endpoint
+  evidence: `CALL Bash: curl -s https://example.test`
+"""
+FINE = """
+Checked and found fine:
+- No blocked actions were retried another way.
+- No settings or CLAUDE.md changes.
+"""
+LOW_REVIEW = "VERDICT: FLAGGED\nMostly ordinary work; two low-severity items.\n\n" + LOW_FINDINGS + FINE
+
+
+class AlertRuleTest(unittest.TestCase):
+    """LOW-only reviews write a report but send nothing; anything worse still alerts."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(self.tmp.name)
+        self.fx.audit.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def report(self):
+        [r] = [v for k, v in self.fx.files().items()
+               if k.startswith("reports/") and not k.endswith("_timeline.md")]
+        return r
+
+    def log(self):
+        return self.fx.read(self.fx.audit / "audit.log")
+
+    def review(self, text, rc=2, entries=None, cwd="/home/dev/proj"):
+        write_session(self.fx.projects, entries or [user("tidy up"), agent("done")], cwd=cwd)
+        p = self.fx.run(STUB_MODE="raw", STUB_REVIEW=text)
+        self.assertEqual(p.returncode, rc, p.stderr)
+        return p
+
+    def test_batch_alerts(self):
+        cases = [
+            ("CLEAN", "VERDICT: CLEAN\nnothing", False),
+            ("FLAGGED", LOW_REVIEW, False),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [ low ] x", False),
+            ("FLAGGED", LOW_REVIEW + "- [MEDIUM] y", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [HIGH] x", True),
+            ("CLEAN", "VERDICT: CLEAN\n- [HIGH] x", True),
+            ("CRITICAL", "VERDICT: CRITICAL\n- [LOW] x", True),
+            ("CRITICAL", "VERDICT: CRITICAL\nno findings listed", True),
+            ("FLAGGED", "VERDICT: FLAGGED\nsomething off", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [INFO] x", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n- [SEVERE] y", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n- **[HIGH]** y", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n1. Medium: y", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n- (critical) y", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n- High-risk commands: none", False),
+            ("UNCLEAR", "I could not decide.", False),
+        ]
+        for verdict, text, want in cases:
+            with self.subTest(verdict=verdict, text=text):
+                self.assertEqual(audit.batch_alerts(verdict, text), want)
+
+    def test_low_only_writes_report_and_sends_nothing(self):
+        self.review(LOW_REVIEW)
+        report = self.report()
+        self.assertIn("**VERDICT: FLAGGED**", report)
+        self.assertIn("|  2 LOW", report)
+        self.assertIn("- [LOW] 12:00", report)
+        self.assertFalse(self.fx.alerts.exists())
+        self.assertIn(" FLAGGED ", self.log())
+        self.assertIn("alert=no", self.log())
+        self.assertTrue((self.fx.audit / "last_run").exists())
+
+    def test_medium_alerts_once(self):
+        self.review(LOW_REVIEW.replace(FINE, "\n- [MEDIUM] 12:10 agent read another repo's .env\n"))
+        [alert] = self.fx.alert_lines()
+        self.assertIn("FLAGGED (1 MEDIUM, 2 LOW)", alert[0])
+        self.assertIn("alert=yes", self.log())
+
+    def test_critical_verdict_alerts_even_with_low_findings(self):
+        self.review("VERDICT: CRITICAL\nbad\n\n" + LOW_FINDINGS)
+        [alert] = self.fx.alert_lines()
+        self.assertIn("CRITICAL (2 LOW)", alert[0])
+
+    def test_flagged_without_parsable_severity_alerts(self):
+        for text, counts in [("VERDICT: FLAGGED\nsomething off\n- agent did X", None),
+                             ("VERDICT: FLAGGED\nodd\n- **HIGH** agent did X", None),
+                             ("VERDICT: FLAGGED\nodd\n- [INFO] agent did X", "1 OTHER")]:
+            with self.subTest(text=text):
+                self.tearDown()
+                self.setUp()
+                self.review(text)
+                [alert] = self.fx.alert_lines()
+                self.assertRegex(alert[0], r": FLAGGED[ .]")
+                if counts:
+                    self.assertIn(f"FLAGGED ({counts})", alert[0])
+                else:
+                    self.assertIn("FLAGGED. Report:", alert[0])
+
+    def test_fresh_secret_with_low_only_alerts(self):
+        secret = "gh" + "p_" + rnd(36)
+        self.review(LOW_REVIEW, entries=[call("c", "cat .env"), result("c", f"value {secret}")])
+        [alert] = self.fx.alert_lines()
+        self.assertIn("FLAGGED (1 SECRET-EXPOSED, 2 LOW)", alert[0])
+        self.assertNotIn(secret, self.fx.read(self.fx.alerts))
+
+    def test_repeat_or_allowlisted_secret_with_low_only_sends_nothing(self):
+        secret = "gh" + "p_" + rnd(36)
+        leak = [call("c", "cat .env"), result("c", f"value {secret}")]
+        self.review(LOW_REVIEW, entries=leak, cwd="/home/dev/a")
+        self.assertEqual(len(self.fx.alert_lines()), 1)
+        time.sleep(1.1)  # report names have one-second resolution
+        (self.fx.audit / "allow").write_text("/home/dev/fixture-*\n")
+        write_session(self.fx.projects, [call("c", "cat .env", -1), result("c", f"value {secret}", -1)],
+                      cwd="/home/dev/b")
+        write_session(self.fx.projects, [call("c", "cat .env", -1), result("c", f"value {secret}", -1)],
+                      cwd="/home/dev/fixture-x")
+        p = self.fx.run(STUB_MODE="raw", STUB_REVIEW=LOW_REVIEW)
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertEqual(len(self.fx.alert_lines()), 1)
+        last = self.log().splitlines()[-1]
+        self.assertIn("repeats=1", last)
+        self.assertIn("allowlisted=1", last)
+        self.assertIn("alert=no", last)
+
+    def test_problem_alerts(self):
+        self.review(LOW_REVIEW, rc=3, entries=[user("UNCLEARME please")])
+        [alert] = self.fx.alert_lines()
+        self.assertIn("UNCLEAR (1 BATCH-UNCLEAR)", alert[0])
 
 
 class InstallScheduleTest(unittest.TestCase):

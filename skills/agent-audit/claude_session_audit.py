@@ -21,9 +21,15 @@ Nothing the script writes, prints or sends carries a recognised secret. Before a
 of that it scans its own output once more; a hit there means the redaction missed
 something, so it writes nothing, alerts, and exits 3.
 
-Alerts stay rare: secrets found in sessions whose cwd matches a glob in
-~/.claude-audit/allow are reported but don't flag or alert, and a secret alerts at
-most once a day (remembered as an HMAC under a per-machine key, never the value).
+Alerts stay rare. The --on-flag commands run only for a secret not alerted in the
+last day, an incomplete review, a failed self-check or an error, or a model review
+worth reading: a CRITICAL verdict, a MEDIUM, HIGH or CRITICAL finding, or a FLAGGED
+verdict whose findings don't all parse as LOW (with --no-llm, a [BLOCKED] pattern
+hit stands in for the review). A run whose findings are all LOW still writes its
+report with the true verdict and counts, but sends nothing.
+Secrets found in sessions whose cwd matches a glob in ~/.claude-audit/allow are
+reported but don't flag or alert, and a secret alerts at most once a day
+(remembered as an HMAC under a per-machine key, never the value).
 
 Usage:
   claude_session_audit.py                    # since last run (first run: last hour)
@@ -690,6 +696,25 @@ def severity_counts(review):
     return counts
 
 
+# A finding line written loosely, e.g. "- **[HIGH]**", "1. High:" or "- (medium)".
+LOOSE_SEVERITY_RE = re.compile(
+    r"^\s*(?:[-*•+]|\d+[.)])?\s*[\[(*_`]*\s*(CRITICAL|HIGH|MEDIUM|LOW)(?![\w-])", re.I | re.M)
+
+
+def batch_alerts(verdict, review):
+    """Whether one batch's review is worth an alert: a CRITICAL verdict or a MEDIUM+
+    finding. A FLAGGED review stays quiet only if its findings parse as LOW and
+    nothing in it reads as a higher severity."""
+    counts = severity_counts(review)
+    if verdict == "CRITICAL" or any(counts.get(s) for s in SEVERITIES[:3]):
+        return True
+    if verdict != "FLAGGED":
+        return False
+    if set(counts) != {"LOW"}:
+        return True
+    return any(m.group(1).upper() != "LOW" for m in LOOSE_SEVERITY_RE.finditer(review))
+
+
 def batch(sections):
     """Split sections into review-sized batches; an oversized one splits at line ends."""
     pieces = []
@@ -754,7 +779,9 @@ def main():
     ap.add_argument("--stdout", action="store_true", help="print timeline instead of saving")
     ap.add_argument("--project", help="only sessions whose folder/cwd contains this text")
     ap.add_argument("--on-flag", action="append", default=[],
-                    help="shell command to run when the model flags something, a secret not "
+                    help="shell command to run when the model reports a CRITICAL verdict, "
+                    "a MEDIUM/HIGH/CRITICAL finding or a FLAGGED verdict whose findings "
+                    "don't all parse as LOW (LOW-only findings don't alert), a secret not "
                     "alerted in the last day is exposed, the review is incomplete, the "
                     "self-check failed or the run errored; repeatable. {alert} = one-line "
                     "alert (verdict, finding counts, host, report path), {report} = report "
@@ -895,6 +922,7 @@ def run(args, red, host):
     timeline_doc = header + timeline
 
     verdict, review, counts = "UNREVIEWED", "(model review skipped: --no-llm)", {}
+    model_alert = False
     if not args.no_llm and sections:
         batches = batch(sections)
         guard("the model input", timeline_doc, *batches)
@@ -913,6 +941,7 @@ def run(args, red, host):
             verdicts.append(v)
             for sev, c in severity_counts(text).items():
                 counts[sev] = counts.get(sev, 0) + c
+            model_alert = model_alert or batch_alerts(v, text)
             if v == "UNCLEAR":
                 problems.append(("BATCH-UNCLEAR", f"{name} came back UNCLEAR (no VERDICT line)"))
             parts.append(f"### {name}: {v}\n{text}")
@@ -923,11 +952,11 @@ def run(args, red, host):
         review = "(nothing to review)"
     if problems:  # a window with a gap in its review is retried next run
         use_state = False
-    flagged = verdict in ("FLAGGED", "CRITICAL") or \
-        (verdict == "UNREVIEWED" and any("BLOCKED" in x[3] or "AFTER-BLOCK" in x[3]
-                                         for x in all_flags))
-    # A repeat still flags the report, but only the model, a new secret or a gap alerts.
-    should_alert = flagged or bool(fresh) or bool(problems)
+    blocked_unreviewed = verdict == "UNREVIEWED" and any(
+        "BLOCKED" in x[3] or "AFTER-BLOCK" in x[3] for x in all_flags)
+    flagged = verdict in ("FLAGGED", "CRITICAL") or blocked_unreviewed
+    # LOW-only findings and repeat secrets flag the report but don't alert.
+    should_alert = model_alert or blocked_unreviewed or bool(fresh) or bool(problems)
     if live:
         verdict = max(verdict, "FLAGGED", key=RANK.index)
         flagged = True
