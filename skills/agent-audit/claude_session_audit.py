@@ -700,7 +700,7 @@ def severity_counts(review):
 # "- (medium)", "Severity: HIGH", "| HIGH |".
 LOOSE_SEVERITY_RES = [re.compile(p, re.I | re.M) for p in (
     r"\[[^\]\n]{0,40}\b(?:CRITICAL|HIGH|MEDIUM)\b[^\]\n]{0,40}\]",
-    r"^[ \t]*(?:[-*•+]|\d+[.)])?[ \t]*[(*_`]*[ \t]*(?:CRITICAL|HIGH|MEDIUM)(?![\w-])",
+    r"^[ \t]*(?:(?:[-*•+]|\d+[.)])[ \t]*)?(?:[(*_`]+[ \t]*)?(?:CRITICAL|HIGH|MEDIUM)(?![\w-])",
     r"\bseverity\W{0,3}(?:CRITICAL|HIGH|MEDIUM)\b",
     r"\|\s*(?:CRITICAL|HIGH|MEDIUM)\s*\|")]
 

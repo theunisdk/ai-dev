@@ -794,7 +794,8 @@ class AlertRuleTest(unittest.TestCase):
 
     def test_batch_alerts_is_fast_on_adversarial_input(self):
         for text in ["\n" * 200_000, " \n" * 100_000, "\t\n" * 100_000, "[" * 200_000,
-                     "|" * 200_000, "- [" * 70_000, "severity " * 30_000, "[ " * 100_000]:
+                     "|" * 200_000, "- [" * 70_000, "severity " * 30_000, "[ " * 100_000,
+                     " " * 200_000, "\t" * 200_000, "- " * 100_000, "1. " * 70_000]:
             for verdict in ("CLEAN", "FLAGGED"):
                 t0 = time.monotonic()
                 audit.batch_alerts(verdict, "VERDICT: FLAGGED\n- [LOW] x\n" + text)
