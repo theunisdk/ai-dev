@@ -775,6 +775,17 @@ class AlertRuleTest(unittest.TestCase):
             ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n1. Medium: y", True),
             ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n- (critical) y", True),
             ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n- High-risk commands: none", False),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n- [Medium-High] y", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n- [LOW→MEDIUM] y", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n- 12:00 [HIGH] y", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n#### [HIGH] y", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n> - [HIGH] y", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n- 🔴 [HIGH] y", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n- **Finding 2 [HIGH]** y", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n- Severity: HIGH", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x\n| HIGH | y |", True),
+            ("FLAGGED", "VERDICT: FLAGGED\n- [LOW] x [REDACTED:github-token#1]", False),
+            ("CLEAN", "VERDICT: CLEAN\n- **[HIGH]** x", True),
             ("UNCLEAR", "I could not decide.", False),
         ]
         for verdict, text, want in cases:

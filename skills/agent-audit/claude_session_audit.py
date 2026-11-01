@@ -24,9 +24,9 @@ something, so it writes nothing, alerts, and exits 3.
 Alerts stay rare. The --on-flag commands run only for a secret not alerted in the
 last day, an incomplete review, a failed self-check or an error, or a model review
 worth reading: a CRITICAL verdict, a MEDIUM, HIGH or CRITICAL finding, or a FLAGGED
-verdict whose findings don't all parse as LOW (with --no-llm, a [BLOCKED] pattern
-hit stands in for the review). A run whose findings are all LOW still writes its
-report with the true verdict and counts, but sends nothing.
+verdict whose findings don't all parse as LOW (with --no-llm, a [BLOCKED] or
+[AFTER-BLOCK] pattern hit stands in for the review). A run whose findings are all
+LOW still writes its report with the true verdict and counts, but sends nothing.
 Secrets found in sessions whose cwd matches a glob in ~/.claude-audit/allow are
 reported but don't flag or alert, and a secret alerts at most once a day
 (remembered as an HMAC under a per-machine key, never the value).
@@ -696,9 +696,13 @@ def severity_counts(review):
     return counts
 
 
-# A finding line written loosely, e.g. "- **[HIGH]**", "1. High:" or "- (medium)".
-LOOSE_SEVERITY_RE = re.compile(
-    r"^\s*(?:[-*•+]|\d+[.)])?\s*[\[(*_`]*\s*(CRITICAL|HIGH|MEDIUM|LOW)(?![\w-])", re.I | re.M)
+# A higher severity written loosely: "- **[HIGH]**", "[Medium-High]", "1. High:",
+# "- (medium)", "Severity: HIGH", "| HIGH |".
+LOOSE_SEVERITY_RES = [re.compile(p, re.I | re.M) for p in (
+    r"\[[^\]\n]{0,40}\b(?:CRITICAL|HIGH|MEDIUM)\b[^\]\n]{0,40}\]",
+    r"^\s*(?:[-*•+]|\d+[.)])?\s*[(*_`]*\s*(?:CRITICAL|HIGH|MEDIUM)(?![\w-])",
+    r"\bseverity\W{0,3}(?:CRITICAL|HIGH|MEDIUM)\b",
+    r"\|\s*(?:CRITICAL|HIGH|MEDIUM)\s*\|")]
 
 
 def batch_alerts(verdict, review):
@@ -708,11 +712,11 @@ def batch_alerts(verdict, review):
     counts = severity_counts(review)
     if verdict == "CRITICAL" or any(counts.get(s) for s in SEVERITIES[:3]):
         return True
-    if verdict != "FLAGGED":
+    if verdict == "UNCLEAR":
         return False
-    if set(counts) != {"LOW"}:
+    if any(rx.search(review) for rx in LOOSE_SEVERITY_RES):
         return True
-    return any(m.group(1).upper() != "LOW" for m in LOOSE_SEVERITY_RE.finditer(review))
+    return verdict == "FLAGGED" and set(counts) != {"LOW"}
 
 
 def batch(sections):
@@ -781,7 +785,8 @@ def main():
     ap.add_argument("--on-flag", action="append", default=[],
                     help="shell command to run when the model reports a CRITICAL verdict, "
                     "a MEDIUM/HIGH/CRITICAL finding or a FLAGGED verdict whose findings "
-                    "don't all parse as LOW (LOW-only findings don't alert), a secret not "
+                    "don't all parse as LOW (LOW-only findings don't alert; with --no-llm, "
+                    "a blocked-action pattern hit), a secret not "
                     "alerted in the last day is exposed, the review is incomplete, the "
                     "self-check failed or the run errored; repeatable. {alert} = one-line "
                     "alert (verdict, finding counts, host, report path), {report} = report "
