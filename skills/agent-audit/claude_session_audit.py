@@ -682,7 +682,7 @@ def verdict_of(review):
 
 
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
-FINDING_RE = re.compile(r"^\s*[-*]\s*\[\s*([A-Za-z]+)\s*\]", re.M)
+FINDING_RE = re.compile(r"^[ \t]*[-*][ \t]*\[[ \t]*([A-Za-z]+)[ \t]*\]", re.M)
 
 
 def severity_counts(review):
@@ -700,7 +700,7 @@ def severity_counts(review):
 # "- (medium)", "Severity: HIGH", "| HIGH |".
 LOOSE_SEVERITY_RES = [re.compile(p, re.I | re.M) for p in (
     r"\[[^\]\n]{0,40}\b(?:CRITICAL|HIGH|MEDIUM)\b[^\]\n]{0,40}\]",
-    r"^\s*(?:[-*•+]|\d+[.)])?\s*[(*_`]*\s*(?:CRITICAL|HIGH|MEDIUM)(?![\w-])",
+    r"^[ \t]*(?:[-*•+]|\d+[.)])?[ \t]*[(*_`]*[ \t]*(?:CRITICAL|HIGH|MEDIUM)(?![\w-])",
     r"\bseverity\W{0,3}(?:CRITICAL|HIGH|MEDIUM)\b",
     r"\|\s*(?:CRITICAL|HIGH|MEDIUM)\s*\|")]
 

@@ -792,6 +792,14 @@ class AlertRuleTest(unittest.TestCase):
             with self.subTest(verdict=verdict, text=text):
                 self.assertEqual(audit.batch_alerts(verdict, text), want)
 
+    def test_batch_alerts_is_fast_on_adversarial_input(self):
+        for text in ["\n" * 200_000, " \n" * 100_000, "\t\n" * 100_000, "[" * 200_000,
+                     "|" * 200_000, "- [" * 70_000, "severity " * 30_000, "[ " * 100_000]:
+            for verdict in ("CLEAN", "FLAGGED"):
+                t0 = time.monotonic()
+                audit.batch_alerts(verdict, "VERDICT: FLAGGED\n- [LOW] x\n" + text)
+                self.assertLess(time.monotonic() - t0, 3, repr(text[:20]))
+
     def test_low_only_writes_report_and_sends_nothing(self):
         self.review(LOW_REVIEW)
         report = self.report()
