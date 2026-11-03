@@ -398,10 +398,27 @@ GIT_OUTWARD = {"push", "pull", "fetch", "clone", "ls-remote", "submodule"}
 _NET_CODE = re.compile(
     r"requests\.|urllib|http\.client|httpx|aiohttp|axios|\bfetch\s*\(|XMLHttpRequest|"
     r"Net::HTTP|Invoke-WebRequest|Invoke-RestMethod|smtplib|\bsocket\b|https?://|"
+    r"subprocess|os\.system|os\.popen|Popen|child_process|\bexec(?:Sync)?\s*\(|\bspawn|"
+    r"\bsystem\s*\(|/dev/(?:tcp|udp)/|\bgh\s|\bgit\s+(?:push|commit)|"
     r"(?<![\w./-])(?:curl|wget|nc|ssh|scp|rsync|tg-notify|sendme|sendmail)(?![\w.-])")
+# An outward command after the secret appears, for the case the parse loses the data flow
+# (a variable, a $(…), a group or loop, a temp file).
+_LATER_OUTWARD = re.compile(
+    r"(?<![\w./-])(curl|wget|nc|ncat|netcat|socat|telnet|ssh|scp|sftp|rsync|ftp|lftp|tg-notify|"
+    r"sendme|telegram-send|sendmail|mail|mailx|mutt|msmtp)(?![\w.-])"
+    r"|\bgit\b[^\n;&|]{0,200}?\b(push|commit|tag|notes)\b"
+    r"|\bgh\b[^\n;&|]{0,80}?\b(pr|issue|api|gist|secret|release)\b")
+_INDIRECT = re.compile(r"[$`({]|\b(?:while|for|until|do|read|xargs|source|eval|mapfile|readarray)\b"
+                       r"|\s-v\s")
+CODE_FLAGS = {"python": {"-c"}, "python3": {"-c"}, "node": {"-e", "-p", "--eval", "--print"},
+              "bun": {"-e", "-p", "--eval", "--print"}, "deno": {"eval"}, "ruby": {"-e"},
+              "perl": {"-e", "-E"}, "php": {"-r"}, "bash": {"-c"}, "sh": {"-c"}, "zsh": {"-c"},
+              "dash": {"-c"}, "pwsh": {"-c", "-Command"}, "powershell": {"-c", "-Command"}}
+_OPT_WITH_ARG = {"-W", "-X", "-I", "-r", "-M", "-o", "-O", "--require", "--import"}
+_INPLACE = {"sed", "gsed", "perl", "ruby", "awk", "gawk"}
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
 _HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][\w.-]*)\1")
-_SCRIPT = re.compile(r".*/.*|.*\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|php)$")
+_SCRIPT = re.compile(r"[^/]*/.*|[^/]*\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|php)")
 _SEPARATORS = {";", "&&", "||", "&", "\n", ";;"}
 _OPERATORS = ("&>>", "<<<", "&&", "||", ";;", "|&", ">>", "<<", "&>", ">|", ">&", "<&", "<>",
               ";", "&", "|", "(", ")", "<", ">", "\n")
@@ -460,10 +477,13 @@ def _segments(cmd):
     lex.whitespace = " \t\r"
     lex.whitespace_split = True
     lex.commenters = ""
-    pipelines, pipe, words, comment = [], [], [], False
+    pipelines, pipe, words, comment, prev = [], [], [], False, None
     for tok in _operators(lex):
         if tok == "\n":
             comment = False
+            if prev in ("|", "|&", "&&", "||"):  # the command goes on after the operator
+                continue
+        prev = tok
         if comment:
             continue
         if tok.startswith("#") and not words:
@@ -505,7 +525,7 @@ def _program(words):
     i = 0
     while i < len(words):
         w = words[i]
-        if _ASSIGN.match(w):
+        if _ASSIGN.match(w) or w in ("{", "!", "if", "then", "else", "elif", "while", "until", "do"):
             i += 1
         elif w in WRAPPERS:
             i += 1
@@ -530,6 +550,54 @@ def _git_sub(words, i):
     return "", ""
 
 
+def _interpreter_args(prog, words, i):
+    """How an interpreter gets its code: ("code", index of the code word), ("stdin", None),
+    or ("script", index of the script or module word)."""
+    flags = CODE_FLAGS.get(prog, set())
+    j = i + 1
+    while j < len(words):
+        w = words[j]
+        if w in flags:
+            return "code", j + 1 if j + 1 < len(words) else None
+        if w == "-":
+            return "stdin", None
+        if w == "-m" and prog in ("python", "python3"):
+            return "script", j + 1 if j + 1 < len(words) else None
+        if w.startswith("-") and not w.startswith("__HEREDOC_"):
+            j += 2 if w in _OPT_WITH_ARG else 1
+        elif w.startswith("__HEREDOC_"):
+            j += 1
+        else:
+            return "script", j
+    return "stdin", None
+
+
+def _inplace_files(prog, words, i):
+    """The files an in-place edit (sed -i, perl -pi, awk -i inplace) writes, or None when
+    the command doesn't edit in place."""
+    args = words[i + 1:]
+    if prog in ("awk", "gawk"):
+        inplace = any(a == "inplace" and k and args[k - 1] == "-i" for k, a in enumerate(args)) \
+            or "--inplace" in args
+    else:
+        inplace = any(re.fullmatch(r"-[A-Za-z]*i\S*|--in-place\S*", a) for a in args)
+    if not inplace:
+        return None
+    code_flags = {"-e", "-E", "-f", "--expression", "--file"}
+    files, has_code, skip = [], False, False
+    for k, a in enumerate(args):
+        if skip:
+            skip = False
+        elif a in code_flags or (prog in ("awk", "gawk") and a in ("-i", "-v")):
+            has_code = has_code or a in code_flags
+            skip = True
+        elif a.startswith("-") or a.startswith("__HEREDOC_"):
+            continue
+        else:
+            files.append(a)
+    return files if has_code else files[1:]
+
+
 def _redirect_targets(words):
     out = []
     for k, w in enumerate(words):
@@ -541,12 +609,18 @@ def _redirect_targets(words):
     return out
 
 
+def bodies_of(words, full):
+    """The heredoc bodies in a simple command: its stdin, not its arguments."""
+    return {f for w, f in zip(words, full) if w.startswith("__HEREDOC_")}
+
+
 class SinkClassifier:
     """Classifies where a secret in a tool call went. Git lookups are cached per run."""
 
     def __init__(self, git="git"):
         self.git = git
         self._paths = {}
+        self._tops = {}
 
     # -- files
     def _run_git(self, *args):
@@ -564,23 +638,39 @@ class SinkClassifier:
         no longer exists or can't be resolved, or a failed git lookup: OUTWARD-UNSURE."""
         if not isinstance(path, str) or not path or "[REDACTED:" in path or re.search(r"[$`*?]", path):
             return UNSURE, f"{how} to a path that can't be resolved"
-        p = os.path.expanduser(path)
-        if not os.path.isabs(p):
-            if not cwd:
-                return UNSURE, f"{how} to a relative path with no known cwd"
-            p = os.path.join(cwd, p)
-        if not os.path.isabs(p):
+        if re.match(r"/dev/(?:tcp|udp)/", path):
+            return OUTWARD, f"network ({path[:8]})"
+        p = self.resolve(path, cwd)
+        if p is None:
             return UNSURE, f"{how} to a relative path with no known cwd"
-        p = os.path.normpath(p)
         key = (p, how)
         if key not in self._paths:
             self._paths[key] = self._classify_path(p, how)
         return self._paths[key]
 
+    @staticmethod
+    def resolve(path, cwd):
+        p = os.path.expanduser(path)
+        if not os.path.isabs(p) and cwd:
+            p = os.path.join(cwd, p)
+        return os.path.normpath(p) if os.path.isabs(p) else None
+
+    def toplevel(self, folder):
+        """The repo root holding folder (or its nearest existing ancestor), or None."""
+        while folder and not os.path.isdir(folder):
+            folder = os.path.dirname(folder)
+        if folder not in self._tops:
+            rc, out = self._run_git("-C", folder or "/", "rev-parse", "--show-toplevel")
+            self._tops[folder] = out[0] if rc == 0 and out[0] else None
+        return self._tops[folder]
+
     def _classify_path(self, p, how):
+        wt = re.search(r"^(.*/\.claude/worktrees/[^/]+)/", p)
+        if wt and not os.path.isdir(wt.group(1)):
+            return UNSURE, f"{how} to a file in a git worktree that has since been removed"
         parent = os.path.dirname(p)
-        if not os.path.isdir(parent):
-            return UNSURE, f"{how} to a file whose folder no longer exists, so git can't say if it is tracked"
+        while not os.path.isdir(parent):  # a folder deleted since: ask git about the path anyway
+            parent = os.path.dirname(parent)
         rc, out = self._run_git("-C", parent, "rev-parse", "--show-toplevel")
         if rc is None:
             return UNSURE, f"{how} to a file; git unavailable ({out})"
@@ -607,11 +697,11 @@ class SinkClassifier:
             return UNSURE, "secret not located in the command"
         try:
             text, bodies = _split_heredocs(cmd)
-            pipelines = _segments(text)
+            pipelines = _segments(re.sub(r"\\\n", " ", text))
         except ValueError:
             return self._fallback(cmd, "unparsable command")
         expand = lambda w: bodies.get(w, w)
-        result = None
+        result, files = None, []
         exported, base, found = False, cwd, False
         for pipe in pipelines:
             fed = False  # the secret reached this pipeline's stdin
@@ -623,23 +713,41 @@ class SinkClassifier:
                 if prog == "cd":
                     target = os.path.expanduser(words[i + 1]) if len(words) > i + 1 else "~"
                     base = os.path.join(base, target) if base else target
-                receives = holder or fed or exported
                 if holder and (prog is None or prog in ("export", "declare", "typeset", "local",
                                                         "readonly", "set")):
                     exported = True  # a variable now holds it for every later command
                     continue
-                if not receives:
+                if not (holder or fed or exported):
                     continue
-                sink = self._program_sink(prog, words, i, full, holder, ph, base, depth)
-                for target in _redirect_targets(words):
+                via_env = exported and not holder and not fed
+                sink = self._program_sink(prog, words, i, full, holder, via_env, ph, base, depth)
+                targets = _redirect_targets(words) if holder or fed else []
+                files += targets
+                for target in targets:
                     sink = _worst(sink, self.classify_path(target, base, "written by Bash"))
+                if holder and (targets or any(w.startswith("__HEREDOC_") for w in words)) \
+                        and _NET_CODE.search(" ".join(full)):
+                    sink = _worst(sink, (UNSURE, "network code written out with the secret"))
                 result = sink if result is None else _worst(result, sink)
                 fed = True
         if not found:
             return UNSURE, "secret not located in the parsed command"
-        return result or (LOCAL, "shell variable only")
+        return self._backstop(cmd, ph, result or (LOCAL, "shell variable only"), files)
 
-    def _program_sink(self, prog, words, i, full, holder, ph, base, depth):
+    def _backstop(self, cmd, ph, result, files):
+        """At least OUTWARD-UNSURE when an outward command follows the secret and the
+        command passes data in a way the parse doesn't follow."""
+        if result[0] != LOCAL:
+            return result
+        if re.search(r"/dev/(?:tcp|udp)/", cmd):
+            return UNSURE, "network (/dev/tcp) in the same command"
+        m = _LATER_OUTWARD.search(cmd, cmd.find(ph))
+        if m and (_INDIRECT.search(cmd) or any(f in cmd[m.start():] for f in files)):
+            word = next(g for g in m.groups() if g)
+            return UNSURE, f"{word} later in a command that carries it through a variable, file or loop"
+        return result
+
+    def _program_sink(self, prog, words, i, full, holder, via_env, ph, base, depth):
         seg = " ".join(full)
         if prog is None:
             return LOCAL, "shell assignment"
@@ -655,6 +763,11 @@ class SinkClassifier:
                 return OUTWARD, "git commit"
             if sub == "remote" and nxt in ("add", "set-url"):
                 return UNSURE, f"git remote {nxt} (used by the next push)"
+            if sub == "config" and re.search(r"\b(?:remote\.[^\s.]+\.(?:push)?url|url\..*\.insteadof)\b",
+                                             seg, re.I):
+                return UNSURE, "git config remote URL (used by the next push)"
+            if sub in ("tag", "notes"):
+                return UNSURE, f"git {sub} (published by a later push)"
             return LOCAL, f"git {sub or '(no subcommand)'}"
         if prog == "gh":
             sub, nxt = _git_sub(words, i)
@@ -664,24 +777,30 @@ class SinkClassifier:
             return UNSURE, f"gh {sub}".strip()
         if prog in CLOUD_PROGS:
             return UNSURE, f"{prog} CLI"
+        if prog in _INPLACE and holder:
+            files = _inplace_files(prog, words, i)
+            if files is not None:
+                if not files:
+                    return UNSURE, f"in-place edit by {prog} of a file that can't be named"
+                sink = (LOCAL, f"local command ({prog})")
+                for path in files:
+                    sink = _worst(sink, self.classify_path(path, base, f"written by Bash ({prog} -i)"))
+                return sink
         if prog in INTERPRETERS:
-            args = words[i + 1:]
-            if (prog in ("bash", "sh", "zsh", "dash") and "-c" in args and depth < 3
-                    and args.index("-c") + 1 < len(args)):
-                inner = full[i + 1 + args.index("-c") + 1]
-                if ph in inner:
-                    return self.classify_bash(inner, ph, base, depth + 1)
-            if _NET_CODE.search(seg):
-                return UNSURE, f"{prog} code that can reach the network"
-            if any(a in ("-c", "-e", "-", "-p", "--eval") or a.startswith("__HEREDOC_") for a in args) \
-                    or not args:
+            mode, k = _interpreter_args(prog, words, i)
+            code = full[k] if mode == "code" and k is not None else ""
+            if (mode == "code" and prog in ("bash", "sh", "zsh", "dash") and ph in code
+                    and depth < 3):
+                return self.classify_bash(code, ph, base, depth + 1)
+            if mode in ("code", "stdin"):
+                if _NET_CODE.search(seg):
+                    return UNSURE, f"{prog} code that can reach the network"
                 return LOCAL, f"inline {prog} code"
-            script = next((a for a in args if not a.startswith("-")), "")
-            if holder and ph not in " ".join(words[:i]) and ph not in script and all(
-                    ph not in a for a in full[i + 1:] if a.startswith("__HEREDOC_")):
+            script = words[k] if k is not None else ""
+            in_args = any(ph in w for w in full[:i] + full[i + 1:] if w not in bodies_of(words, full))
+            if in_args or via_env:
                 return UNSURE, f"passed to {prog} {script}".strip()
-            return (LOCAL, f"piped to local {prog} script") if not holder else \
-                (UNSURE, f"passed to {prog} {script}".strip())
+            return LOCAL, f"piped to local {prog} script {script}".strip()
         if prog == "eval" and depth < 3:
             inner = " ".join(full[i + 1:])
             return self.classify_bash(inner, ph, base, depth + 1) if ph in inner else (UNSURE, "eval")
@@ -690,8 +809,36 @@ class SinkClassifier:
                 return UNSURE, f"{prog} with a network-looking argument"
             return LOCAL, f"local command ({prog})"
         if _SCRIPT.fullmatch(prog):
-            return (UNSURE, f"passed to {prog}") if holder else (LOCAL, f"piped to local script {prog}")
+            in_args = any(ph in w for w in full[:i] + full[i + 1:] if w not in bodies_of(words, full))
+            if in_args or via_env:
+                return UNSURE, f"passed to {prog}"
+            return LOCAL, f"piped to local script {prog}"
         return UNSURE, f"passed to {prog}"
+
+    def commit_repos(self, cmd, cwd):
+        """The repos a shell command runs git commit in: each a root path, or None where
+        it can't tell. Empty when it doesn't commit."""
+        if not isinstance(cmd, str) or "commit" not in cmd:
+            return []
+        try:
+            text, _ = _split_heredocs(cmd)
+            pipelines = _segments(re.sub(r"\\\n", " ", text))
+        except ValueError:
+            return [None] if re.search(r"\bgit\b[^\n;&|]*\bcommit\b", cmd) else []
+        repos, base = [], cwd
+        for words in (w for pipe in pipelines for w in pipe):
+            prog, i = _program(words)
+            if prog == "cd":
+                target = os.path.expanduser(words[i + 1]) if len(words) > i + 1 else "~"
+                base = os.path.join(base, target) if base else target
+            elif prog == "git" and _git_sub(words, i)[0] == "commit":
+                folder = base
+                for k in range(i + 1, len(words) - 1):
+                    if words[k] == "-C":
+                        folder = os.path.join(folder or "", os.path.expanduser(words[k + 1]))
+                folder = self.resolve(folder, cwd) if folder else None
+                repos.append(self.toplevel(folder) if folder else None)
+        return repos
 
     def _fallback(self, cmd, why):
         for rx, name in ((re.compile(r"(?<![\w./-])(curl|wget|nc|ssh|scp|rsync|sftp|ftp|tg-notify|"
@@ -744,7 +891,7 @@ class SinkClassifier:
 
 
 def one_line(text):
-    return re.sub(r"[ \t]*\r?\n\s*", " ⏎ ", text.strip())
+    return " ⏎ ".join(l.strip() for l in text.strip().splitlines() if l.strip())
 
 
 def call_detail(tool, inp):
@@ -757,7 +904,7 @@ def call_detail(tool, inp):
     return json.dumps(inp, ensure_ascii=False)
 
 
-_PATHISH = re.compile(r"[\w.~@-]*[/.][\w./~@-]*")
+_PATHISH = re.compile(r"[\w./~@-]+")
 
 
 def context_paths(tool, inp):
@@ -769,7 +916,8 @@ def context_paths(tool, inp):
     if isinstance(cmd, str):
         for w in re.split(r"[\s'\"=;|&<>()]+", cmd):
             if w and "://" not in w and "[REDACTED:" not in w and not w.startswith("-") \
-                    and _PATHISH.fullmatch(w) and not re.fullmatch(r"[\d.]+", w):
+                    and ("/" in w or "." in w) and _PATHISH.fullmatch(w) \
+                    and not re.fullmatch(r"[\d.]+", w):
                 paths.append(w)
     return paths
 
@@ -787,7 +935,7 @@ DEMOTION_KINDS = {  # kind -> what the reason says; EXEMPT ones never alert, eve
     "user-pasted": "the user pasted it into their own prompt",
     "aws-key-id-alone": "an AWS access key ID with no secret key beside it",
     "placeholder": "placeholder"}
-EXEMPT_OUTWARD = {"test-fixture", "names-list"}
+EXEMPT_OUTWARD = {"test-fixture", "names-list"}  # test-fixture only for writes and commits of fixtures
 
 
 def _entropy_per_char(v):
@@ -803,11 +951,14 @@ def demotion(kind, value, name, occurrences):
     None otherwise. occurrences carry "paths", "file_tool", "user_pasted", "companions"."""
     paths = [p for o in occurrences for p in o.get("paths", ())]
     file_paths = [p for o in occurrences if o.get("file_tool") for p in o.get("paths", ())]
-    fixture = [p for p in paths if _FIXTURE_PATH.search(p)]
+    read_paths = [p for o in occurrences if o.get("file_tool") or o["where"].startswith("tool result")
+                  for p in o.get("paths", ())]
+    fixture = [p for p in read_paths if _FIXTURE_PATH.search(p)]
     if fixture and not any(not _FIXTURE_PATH.search(p) for p in file_paths):
         return "test-fixture", f"test fixture (seen with {fixture[0]})"
     if kind in _GENERIC_KINDS and re.fullmatch(r"[(\[{'\"]*[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+[)\]}'\",]*",
-                                               value):
+                                               value) \
+            and (value[0] in "([" or re.search(r"(?:SECRETS|KEYS|TOKENS|NAMES|VARS)$", (name or "").upper())):
         return "names-list", DEMOTION_KINDS["names-list"]
     if name and name.upper() == "CLAUDE_CODE_MESSAGING_TOKEN":
         return "local-ipc-token", DEMOTION_KINDS["local-ipc-token"]
@@ -849,7 +1000,9 @@ def summarize_secrets(exposed, red, globs, memory):
             cls = _worst((cls, ""), (o["class"], ""))[0]
         value = red.value_of(ph)
         dem = demotion(occ[0]["type"], value, red.name_of(ph), occ)
-        counts = bool(live) and cls != LOCAL and (dem is None or dem[0] not in EXEMPT_OUTWARD)
+        exempt = dem is not None and (dem[0] == "names-list" or dem[0] == "test-fixture" and all(
+            o.get("fixture_sink") for o in live if o["class"] != LOCAL))
+        counts = bool(live) and cls != LOCAL and not exempt
         digest = memory.digest(value) if memory else None
         sessions = []
         for o in occ:
@@ -1123,7 +1276,7 @@ def read_session(path: Path, cutoff: dt.datetime, red: Redactor, sinks=None):
         meta["dropped"][what] = meta["dropped"].get(what, 0) + 1
 
     def note(hits, t, where, tool=None, cls=LOCAL, sink=None, detail="", paths=(),
-             file_tool=False, user_pasted=False, classify=None, skip=()):
+             file_tool=False, user_pasted=False, classify=None, skip=(), fixture_sink=False):
         """Record each placeholder in hits once for this entry. classify(ph) -> (class,
         sink) overrides cls and sink per placeholder."""
         kinds = {k for k, _ in hits}
@@ -1135,10 +1288,10 @@ def read_session(path: Path, cutoff: dt.datetime, red: Redactor, sinks=None):
             c, s = classify(ph) if classify else (cls, sink)
             meta["exposed"].append({
                 "t": t, "type": kind, "placeholder": ph, "where": where, "tool": tool,
-                "class": c, "sink": s or where,
+                "class": c, "sink": red.clip(one_line(s or where), 160),
                 "detail": red.clip(one_line(detail), SINK_DETAIL_LIMIT) if detail else "",
                 "paths": list(paths), "file_tool": file_tool, "user_pasted": user_pasted,
-                "companions": sorted(kinds - {kind})})
+                "fixture_sink": fixture_sink, "companions": sorted(kinds - {kind})})
         return done
 
     def scan(value, t, where, skip=()):
@@ -1252,23 +1405,34 @@ def read_session(path: Path, cutoff: dt.datetime, red: Redactor, sinks=None):
                             return sinks.classify_call(tool, red_inp, ph, ecwd or meta["cwd"])
                         except Exception as ex:  # a classifier bug never reads as LOCAL
                             return UNSURE, f"sink classification failed ({type(ex).__name__})"
+                    target, repo = None, None
+                    if tool in FILE_WRITE_TOOLS and isinstance(red_inp, dict):
+                        target = red_inp.get(FILE_WRITE_TOOLS[tool][0])
+                        target = target if isinstance(target, str) else None
                     before = len(meta["exposed"])
                     done |= note(hits, t, f"tool call input ({tool})", tool=tool, detail=detail,
-                                 paths=paths, file_tool=file_tool, classify=classify)
+                                 paths=paths, file_tool=file_tool, classify=classify,
+                                 fixture_sink=bool(target and _FIXTURE_PATH.search(target)))
                     for o in meta["exposed"][before:]:
-                        if tool in FILE_WRITE_TOOLS and o["class"] != LOCAL:
-                            written.setdefault(o["placeholder"], []).append(o)
-                        elif tool == "Bash" and o["sink"].startswith("written by Bash") \
-                                and o["class"] != LOCAL:
-                            written.setdefault(o["placeholder"], []).append(o)
-                    if tool in ("Bash", "Monitor") and isinstance(red_inp, dict) and \
-                            re.search(r"\bgit\b[^\n;&|]*\bcommit\b", str(red_inp.get("command"))):
-                        for ph, writes in written.items():
-                            w = writes[-1]
+                        if o["class"] == LOCAL:
+                            continue
+                        if target:
+                            resolved = sinks.resolve(target, ecwd or meta["cwd"])
+                            repo = sinks.toplevel(os.path.dirname(resolved)) if resolved else None
+                            written.setdefault(o["placeholder"], []).append(dict(o, _repo=repo))
+                        elif tool == "Bash" and o["sink"].startswith("written by Bash"):
+                            written.setdefault(o["placeholder"], []).append(dict(o, _repo=None))
+                    repos = (sinks.commit_repos(red_inp.get("command"), ecwd or meta["cwd"])
+                             if tool in ("Bash", "Monitor") and isinstance(red_inp, dict) and written
+                             else [])
+                    for ph, writes in written.items() if repos else ():
+                        w = writes[-1]
+                        if w["_repo"] is None or None in repos or w["_repo"] in repos:
                             meta["exposed"].append(dict(
                                 w, t=t, where=f"tool call input ({tool})", tool=tool,
-                                **{"class": OUTWARD}, sink=f"git commit after it was written "
-                                f"by {w['tool']} ({w['detail']})",
+                                **{"class": OUTWARD}, sink=red.clip(one_line(
+                                    f"git commit after it was written by {w['tool']} "
+                                    f"({w['detail']})"), 160),
                                 detail=red.clip(one_line(detail), SINK_DETAIL_LIMIT)))
                     pending[c.get("id")] = len(events)
                     events.append({"t": t, "kind": "call", "tool": tool, "input": inp,
