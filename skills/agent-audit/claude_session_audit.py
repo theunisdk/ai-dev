@@ -13,7 +13,12 @@ so an hourly cron job has no gaps or overlaps.
      messages, every tool call, the first few hundred characters of each result,
      and the window's ask-on-block log lines
   3. Replaces every secret it recognises with a placeholder such as
-     [REDACTED:github-token#2], and records each one as a SECRET-EXPOSED finding
+     [REDACTED:github-token#2], and records every place each one appeared and where
+     it went: LOCAL (it only entered the transcript), OUTWARD (a network command,
+     git push or commit, gh pr/issue body, WebFetch, an MCP send, a write to a
+     git-tracked file) or OUTWARD-UNSURE (it may have left; counts as outward).
+     Test fixtures, placeholders, public client keys and the like are demoted, with
+     the reason. Secrets are counted once per value, not per session
   4. Runs cheap pattern checks (blocked actions, workaround language, risky commands)
   5. Sends the redacted timeline to Claude (Sonnet 5.5 by default, no tools, not
      saved as a session) for a review, and writes a report. The review runs through
@@ -23,8 +28,9 @@ Nothing the script writes, prints or sends carries a recognised secret. Before a
 of that it scans its own output once more; a hit there means the redaction missed
 something, so it writes nothing, alerts, and exits 3.
 
-Alerts stay rare. The --on-flag commands run only for a secret not alerted in the
-last day, an incomplete review, a failed self-check or an error, or a model review
+Alerts stay rare. The --on-flag commands run only for a secret that went outward
+(and isn't a test fixture or a list of names) and wasn't alerted in the last day,
+an incomplete review, a failed self-check or an error, or a model review
 worth reading: a CRITICAL verdict, a MEDIUM, HIGH or CRITICAL finding, or a FLAGGED
 verdict whose findings don't all parse as LOW (with --no-llm, a [BLOCKED] or
 [AFTER-BLOCK] pattern hit stands in for the review). A run whose findings are all
@@ -32,7 +38,8 @@ LOW still writes its report with the true verdict and counts, but sends nothing.
 model finding whose session and category already alerted in the last day (at the
 same or a higher severity) is marked REPEAT in the report and doesn't count;
 CRITICAL findings and verdicts always count.
-Secrets found in sessions whose cwd matches a glob in ~/.claude-audit/allow are
+A secret that stayed local is listed in the report but doesn't flag or alert.
+Secrets found only in sessions whose cwd matches a glob in ~/.claude-audit/allow are
 reported but don't flag or alert, and a secret alerts at most once a day
 (remembered as an HMAC under a per-machine key, never the value).
 
@@ -46,7 +53,8 @@ Usage:
 Schedule it hourly with install-schedule.sh (launchd on macOS, cron elsewhere).
 
 Exit codes: 0 clean / nothing to review, 2 something flagged, 3 the review is
-incomplete (a batch failed or came back unreadable, or a transcript was skipped;
+incomplete (a batch failed or came back unreadable, or a transcript or folder
+couldn't be read;
 the window is retried next run) or the redaction self-check failed (nothing
 written), 1 error. 3 wins over 2: the report and the alert carry the verdict.
 """
@@ -56,6 +64,7 @@ import fnmatch
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -198,7 +207,15 @@ SECRET_RULES = [
     ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), None),
     ("slack-token", re.compile(r"\bxox[abposr]-[A-Za-z0-9\-]{10,}"), None),
     ("stripe-key", re.compile(r"\b(?:sk|rk)_live_[A-Za-z0-9]{16,}"), None),
+    ("stripe-test-key", re.compile(r"\b(?:sk|rk)_test_[A-Za-z0-9]{16,}"), None),
     ("google-api-key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}"), None),
+    ("google-oauth-token", re.compile(r"\bya29\.[0-9A-Za-z_\-]{20,}"), None),
+    ("google-refresh-token", re.compile(r"(?<![A-Za-z0-9_/])1//0[0-9A-Za-z_\-]{30,}"), None),
+    ("sendgrid-key", re.compile(r"\bSG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{30,}"), None),
+    ("supabase-token", re.compile(r"\bsbp_[A-Za-z0-9]{32,}"), None),
+    ("npm-token", re.compile(r"\bnpm_[A-Za-z0-9]{36,}"), None),
+    ("gitlab-token", re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}"), None),
+    ("posthog-project-key", re.compile(r"\bphc_[A-Za-z0-9]{32,}"), None),
     ("telegram-bot-token", re.compile(r"(?<!\d)\d{8,10}:[A-Za-z0-9_\-]{35}(?![A-Za-z0-9_\-])"),
      None),
     ("bearer-token", re.compile(
@@ -245,6 +262,7 @@ class Redactor:
         self._ids = {}
         self._counts = {}
         self._values = {}
+        self._names = {}  # placeholder -> the variable or key name it was assigned to
 
     def _placeholder(self, kind, value):
         key = (kind, value)
@@ -257,6 +275,9 @@ class Redactor:
     def value_of(self, placeholder):
         return self._values[placeholder]
 
+    def name_of(self, placeholder):
+        return self._names.get(placeholder)
+
     def redact(self, text):
         """Return (redacted text, [(type, placeholder), ...] in order of appearance)."""
         if not isinstance(text, str) or not text:
@@ -268,6 +289,8 @@ class Redactor:
                     return m.group(0)
                 a, b = _span(m)
                 ph = self._placeholder(kind, m.string[a:b])
+                if "name" in m.re.groupindex:
+                    self._names.setdefault(ph, m.group("name"))
                 hits.append((kind, ph))
                 s = m.start()
                 return m.string[s:a] + ph + m.string[b:m.end()]
@@ -296,6 +319,7 @@ class Redactor:
             out, h = self.redact(value)
             if not h and isinstance(key, str) and _dict_secret_name(key) and _real_value(value, 8):
                 out = self._placeholder("config-secret", value)
+                self._names.setdefault(out, key)
                 h = [("config-secret", out)]
             hits += h
             return out
@@ -315,6 +339,533 @@ def guard(where, *texts):
         kinds = find_secrets(t) if t else []
         if kinds:
             raise SelfCheckFailed(f"{', '.join(kinds)} in {where}")
+
+
+# ---------------------------------------------------------------- secret sinks
+# Where each occurrence of a secret went. LOCAL: it only entered the transcript (and so
+# the model's context). OUTWARD: a tool or command sent it off the machine, or into a
+# file git can publish. OUTWARD-UNSURE: it may have; it counts as outward. Anything the
+# classifier can't work out lands in OUTWARD-UNSURE, never LOCAL.
+LOCAL, OUTWARD, UNSURE = "LOCAL", "OUTWARD", "OUTWARD-UNSURE"
+_CLASS_RANK = (LOCAL, UNSURE, OUTWARD)
+SINK_DETAIL_LIMIT = 200
+
+LOCAL_TOOLS = {
+    "Read", "Glob", "Grep", "LS", "NotebookRead", "BashOutput", "KillShell", "KillBash",
+    "TodoWrite", "TodoRead", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskOutput",
+    "TaskStop", "AskUserQuestion", "ExitPlanMode", "EnterPlanMode", "Skill", "ToolSearch",
+    "ListAgents", "ReadNotifications", "EnterWorktree", "ExitWorktree", "ScheduleWakeup",
+    "CronList", "CronDelete", "LSP", "Workflow"}
+FILE_WRITE_TOOLS = {  # tool -> (path field, fields holding the text written)
+    "Write": ("file_path", ("content",)), "Edit": ("file_path", ("new_string",)),
+    "MultiEdit": ("file_path", ("edits",)), "NotebookEdit": ("notebook_path", ("new_source",))}
+OUTWARD_TOOLS = {"WebFetch": "WebFetch request", "WebSearch": "WebSearch query",
+                 "Artifact": "Artifact publish", "ArtifactData": "Artifact data",
+                 "ArtifactComments": "Artifact comment", "PushNotification": "push notification",
+                 "SendUserFile": "file sent to the user's devices"}
+_MCP_SENDS = re.compile(r"send|create|post|reply|forward|update|draft|comment|publish|upload|"
+                        r"write|message|share|batch|insert|add|edit|set|put|push|submit|invite|"
+                        r"respond|label|move|copy|type|fill|navigate|click", re.I)
+
+NET_PROGS = {"curl", "wget", "http", "https", "httpie", "xh", "nc", "ncat", "netcat", "socat",
+             "telnet", "ssh", "scp", "sftp", "rsync", "ftp", "lftp", "websocat", "grpcurl"}
+MSG_PROGS = {"tg-notify", "sendme", "telegram-send", "mail", "mailx", "sendmail", "mutt",
+             "msmtp", "slack", "slack-notify"}
+CLOUD_PROGS = {"aws", "gcloud", "gsutil", "bq", "az", "doppler", "vercel", "supabase", "firebase",
+               "wrangler", "flyctl", "fly", "heroku", "kubectl", "helm", "docker", "podman",
+               "npm", "pnpm", "yarn", "npx", "twine", "terraform", "pulumi", "psql", "mysql",
+               "mongosh", "mongo", "redis-cli", "openssl", "claude", "xdg-open", "open",
+               "pip", "pip3", "cargo", "gem", "eas", "expo", "netlify", "railway", "stripe"}
+INTERPRETERS = {"python", "python3", "node", "ruby", "perl", "bash", "sh", "zsh", "dash",
+                "deno", "bun", "php", "pwsh", "powershell"}
+LOCAL_PROGS = {
+    "echo", "printf", "cat", "tac", "grep", "egrep", "fgrep", "rg", "ag", "ack", "sed", "awk",
+    "gawk", "mawk", "head", "tail", "less", "more", "wc", "sort", "uniq", "cut", "tr", "jq",
+    "yq", "base64", "base32", "xxd", "od", "hexdump", "strings", "diff", "cmp", "comm",
+    "paste", "column", "fold", "nl", "rev", "ls", "cd", "pwd", "mkdir", "rmdir", "cp", "mv",
+    "rm", "ln", "touch", "chmod", "chown", "stat", "file", "find", "fd", "test", "[", "[[",
+    "true", "false", ":", "export", "unset", "set", "declare", "typeset", "local", "readonly",
+    "read", "source", ".", "printenv", "which", "type", "hash", "alias", "sha256sum",
+    "sha1sum", "sha512sum", "md5sum", "shasum", "b2sum", "cksum", "tmux", "realpath",
+    "readlink", "dirname", "basename", "date", "sleep", "exit", "return", "wait", "shift",
+    "let", "expr", "seq", "yes", "tee", "pbcopy", "xclip", "xsel", "clear", "mktemp", "tar",
+    "zip", "unzip", "gzip", "gunzip", "notify-send", "claude-spawn", "claude-rc", "if",
+    "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac",
+    "function", "{", "}", "!", "env-scope", "dev-whoami"}
+WRAPPERS = {"sudo", "command", "builtin", "nohup", "time", "nice", "ionice", "stdbuf", "exec",
+            "timeout", "env", "xargs", "watch", "doas"}
+GIT_OUTWARD = {"push", "pull", "fetch", "clone", "ls-remote", "submodule"}
+_NET_CODE = re.compile(
+    r"requests\.|urllib|http\.client|httpx|aiohttp|axios|\bfetch\s*\(|XMLHttpRequest|"
+    r"Net::HTTP|Invoke-WebRequest|Invoke-RestMethod|smtplib|\bsocket\b|https?://|"
+    r"(?<![\w./-])(?:curl|wget|nc|ssh|scp|rsync|tg-notify|sendme|sendmail)(?![\w.-])")
+_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
+_HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][\w.-]*)\1")
+_SCRIPT = re.compile(r".*/.*|.*\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|php)$")
+_SEPARATORS = {";", "&&", "||", "&", "\n", ";;"}
+_OPERATORS = ("&>>", "<<<", "&&", "||", ";;", "|&", ">>", "<<", "&>", ">|", ">&", "<&", "<>",
+              ";", "&", "|", "(", ")", "<", ">", "\n")
+_REDIRECTS = {">", ">>", "&>", "&>>", ">|", "1>", "2>"}
+
+
+def _worst(a, b):
+    """The more outward of two (class, sink) pairs; the first wins a tie."""
+    return b if _CLASS_RANK.index(b[0]) > _CLASS_RANK.index(a[0]) else a
+
+
+def _strings(value):
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [s for v in value for s in _strings(v)]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _strings(v)]
+    return []
+
+
+def _holds(value, ph):
+    return any(ph in s for s in _strings(value))
+
+
+def _split_heredocs(cmd):
+    """Take heredoc bodies out of a command: each becomes a marker word, so shlex never
+    parses a body as commands. Returns (command, {marker: body})."""
+    out, bodies, lines, i = [], {}, cmd.split("\n"), 0
+    while i < len(lines):
+        line = lines[i]
+        delims = []
+
+        def mark(m):
+            marker = f"__HEREDOC_{len(bodies) + len(delims)}__"
+            delims.append((marker, m.group(2), m.group(0).startswith("<<-")))
+            return f"{m.group(0)} {marker}"
+        out.append(_HEREDOC.sub(mark, line) if "<<" in line and "<<<" not in line else line)
+        i += 1
+        for marker, delim, dash in delims:
+            body = []
+            while i < len(lines) and (lines[i].lstrip("\t") if dash else lines[i]) != delim:
+                body.append(lines[i])
+                i += 1
+            if i >= len(lines):
+                raise ValueError("heredoc without its delimiter line")
+            i += 1  # the delimiter line
+            bodies[marker] = "\n".join(body)
+    return "\n".join(out), bodies
+
+
+def _segments(cmd):
+    """Split a shell command into pipelines of simple commands: [[words, ...], ...].
+    Raises ValueError when shlex can't parse it."""
+    lex = shlex.shlex(cmd, posix=True, punctuation_chars="();<>|&\n")
+    lex.whitespace = " \t\r"
+    lex.whitespace_split = True
+    lex.commenters = ""
+    pipelines, pipe, words, comment = [], [], [], False
+    for tok in _operators(lex):
+        if tok == "\n":
+            comment = False
+        if comment:
+            continue
+        if tok.startswith("#") and not words:
+            comment = True
+            continue
+        if tok in _SEPARATORS or tok == "\n":
+            if words:
+                pipe.append(words)
+            if pipe:
+                pipelines.append(pipe)
+            pipe, words = [], []
+        elif tok in ("|", "|&", "(", ")"):  # $(…) output can feed the rest of the pipe
+            if words:
+                pipe.append(words)
+            words = []
+        else:
+            words.append(tok)
+    if words:
+        pipe.append(words)
+    if pipe:
+        pipelines.append(pipe)
+    return pipelines
+
+
+def _operators(tokens):
+    """shlex runs adjacent operator characters together (")|", ";\\n"): split them."""
+    for tok in tokens:
+        if tok and all(c in "();<>|&\n" for c in tok) and tok not in _OPERATORS:
+            while tok:
+                op = next((o for o in _OPERATORS if tok.startswith(o)), tok[0])
+                yield op
+                tok = tok[len(op):]
+        else:
+            yield tok
+
+
+def _program(words):
+    """(program, index of its first word) after env assignments and wrappers like sudo."""
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if _ASSIGN.match(w):
+            i += 1
+        elif w in WRAPPERS:
+            i += 1
+            while i < len(words) and (words[i].startswith("-") or _ASSIGN.match(words[i])
+                                      or (w in ("timeout", "nice") and re.fullmatch(r"[\d.]+[smhd]?", words[i]))):
+                i += 1
+        else:
+            return os.path.basename(w) if "/" in w and not w.startswith(("./", "../")) else w, i
+    return None, len(words)
+
+
+def _git_sub(words, i):
+    j = i + 1
+    while j < len(words):
+        w = words[j]
+        if w in ("-C", "-c", "--git-dir", "--work-tree", "-R", "--repo"):
+            j += 2
+        elif w.startswith("-"):
+            j += 1
+        else:
+            return w, words[j + 1] if j + 1 < len(words) else ""
+    return "", ""
+
+
+def _redirect_targets(words):
+    out = []
+    for k, w in enumerate(words):
+        if w in _REDIRECTS and k + 1 < len(words):
+            out.append(words[k + 1])
+    prog, i = _program(words)
+    if prog == "tee":
+        out += [w for w in words[i + 1:] if not w.startswith("-")]
+    return out
+
+
+class SinkClassifier:
+    """Classifies where a secret in a tool call went. Git lookups are cached per run."""
+
+    def __init__(self, git="git"):
+        self.git = git
+        self._paths = {}
+
+    # -- files
+    def _run_git(self, *args):
+        try:
+            p = subprocess.run([self.git, *args], capture_output=True, text=True, timeout=15,
+                               stdin=subprocess.DEVNULL,
+                               env=dict(os.environ, GIT_OPTIONAL_LOCKS="0", LC_ALL="C"))
+        except (OSError, subprocess.SubprocessError) as ex:
+            return None, type(ex).__name__
+        return p.returncode, (p.stdout.strip(), p.stderr.strip())
+
+    def classify_path(self, path, cwd, how):
+        """(class, sink) for a secret written to path. Outside any git repo or gitignored:
+        LOCAL. Tracked: OUTWARD. Untracked but not ignored (could be committed), a path that
+        no longer exists or can't be resolved, or a failed git lookup: OUTWARD-UNSURE."""
+        if not isinstance(path, str) or not path or "[REDACTED:" in path or re.search(r"[$`*?]", path):
+            return UNSURE, f"{how} to a path that can't be resolved"
+        p = os.path.expanduser(path)
+        if not os.path.isabs(p):
+            if not cwd:
+                return UNSURE, f"{how} to a relative path with no known cwd"
+            p = os.path.join(cwd, p)
+        if not os.path.isabs(p):
+            return UNSURE, f"{how} to a relative path with no known cwd"
+        p = os.path.normpath(p)
+        key = (p, how)
+        if key not in self._paths:
+            self._paths[key] = self._classify_path(p, how)
+        return self._paths[key]
+
+    def _classify_path(self, p, how):
+        parent = os.path.dirname(p)
+        if not os.path.isdir(parent):
+            return UNSURE, f"{how} to a file whose folder no longer exists, so git can't say if it is tracked"
+        rc, out = self._run_git("-C", parent, "rev-parse", "--show-toplevel")
+        if rc is None:
+            return UNSURE, f"{how} to a file; git unavailable ({out})"
+        if rc != 0:
+            if "not a git repository" in out[1]:
+                return LOCAL, f"{how} to a file outside any git repo"
+            return UNSURE, f"{how} to a file; git rev-parse failed (exit {rc})"
+        rc, out = self._run_git("-C", parent, "check-ignore", "-q", "--", p)
+        if rc == 0:
+            return LOCAL, f"{how} to a gitignored file"
+        if rc != 1:
+            return UNSURE, f"{how} to a file in a git repo; git check-ignore failed (exit {rc})"
+        rc, out = self._run_git("-C", parent, "ls-files", "--error-unmatch", "--", p)
+        if rc == 0:
+            return OUTWARD, f"{how} to a git-tracked file"
+        if rc == 1:
+            return UNSURE, f"{how} to an untracked, not-ignored file in a git repo (can be committed)"
+        return UNSURE, f"{how} to a file in a git repo; git ls-files failed (exit {rc})"
+
+    # -- shell commands
+    def classify_bash(self, cmd, ph, cwd, depth=0):
+        """(class, sink) for a secret placeholder in a shell command."""
+        if not isinstance(cmd, str) or ph not in cmd:
+            return UNSURE, "secret not located in the command"
+        try:
+            text, bodies = _split_heredocs(cmd)
+            pipelines = _segments(text)
+        except ValueError:
+            return self._fallback(cmd, "unparsable command")
+        expand = lambda w: bodies.get(w, w)
+        result = None
+        exported, base, found = False, cwd, False
+        for pipe in pipelines:
+            fed = False  # the secret reached this pipeline's stdin
+            for words in pipe:
+                full = [expand(w) for w in words]
+                holder = any(ph in w for w in full)
+                found = found or holder
+                prog, i = _program(words)
+                if prog == "cd":
+                    target = os.path.expanduser(words[i + 1]) if len(words) > i + 1 else "~"
+                    base = os.path.join(base, target) if base else target
+                receives = holder or fed or exported
+                if holder and (prog is None or prog in ("export", "declare", "typeset", "local",
+                                                        "readonly", "set")):
+                    exported = True  # a variable now holds it for every later command
+                    continue
+                if not receives:
+                    continue
+                sink = self._program_sink(prog, words, i, full, holder, ph, base, depth)
+                for target in _redirect_targets(words):
+                    sink = _worst(sink, self.classify_path(target, base, "written by Bash"))
+                result = sink if result is None else _worst(result, sink)
+                fed = True
+        if not found:
+            return UNSURE, "secret not located in the parsed command"
+        return result or (LOCAL, "shell variable only")
+
+    def _program_sink(self, prog, words, i, full, holder, ph, base, depth):
+        seg = " ".join(full)
+        if prog is None:
+            return LOCAL, "shell assignment"
+        if prog in NET_PROGS:
+            return OUTWARD, f"network ({prog})"
+        if prog in MSG_PROGS:
+            return OUTWARD, f"message ({prog})"
+        if prog == "git":
+            sub, nxt = _git_sub(words, i)
+            if sub in GIT_OUTWARD:
+                return OUTWARD, f"git {sub}"
+            if sub == "commit":
+                return OUTWARD, "git commit"
+            if sub == "remote" and nxt in ("add", "set-url"):
+                return UNSURE, f"git remote {nxt} (used by the next push)"
+            return LOCAL, f"git {sub or '(no subcommand)'}"
+        if prog == "gh":
+            sub, nxt = _git_sub(words, i)
+            if sub in ("pr", "issue") and nxt in ("create", "comment", "edit", "review", "close",
+                                                  "reopen", "merge"):
+                return OUTWARD, f"gh {sub} {nxt}"
+            return UNSURE, f"gh {sub}".strip()
+        if prog in CLOUD_PROGS:
+            return UNSURE, f"{prog} CLI"
+        if prog in INTERPRETERS:
+            args = words[i + 1:]
+            if (prog in ("bash", "sh", "zsh", "dash") and "-c" in args and depth < 3
+                    and args.index("-c") + 1 < len(args)):
+                inner = full[i + 1 + args.index("-c") + 1]
+                if ph in inner:
+                    return self.classify_bash(inner, ph, base, depth + 1)
+            if _NET_CODE.search(seg):
+                return UNSURE, f"{prog} code that can reach the network"
+            if any(a in ("-c", "-e", "-", "-p", "--eval") or a.startswith("__HEREDOC_") for a in args) \
+                    or not args:
+                return LOCAL, f"inline {prog} code"
+            script = next((a for a in args if not a.startswith("-")), "")
+            if holder and ph not in " ".join(words[:i]) and ph not in script and all(
+                    ph not in a for a in full[i + 1:] if a.startswith("__HEREDOC_")):
+                return UNSURE, f"passed to {prog} {script}".strip()
+            return (LOCAL, f"piped to local {prog} script") if not holder else \
+                (UNSURE, f"passed to {prog} {script}".strip())
+        if prog == "eval" and depth < 3:
+            inner = " ".join(full[i + 1:])
+            return self.classify_bash(inner, ph, base, depth + 1) if ph in inner else (UNSURE, "eval")
+        if prog in LOCAL_PROGS:
+            if _NET_CODE.search(seg) and prog not in ("echo", "printf", "grep", "rg", "cat"):
+                return UNSURE, f"{prog} with a network-looking argument"
+            return LOCAL, f"local command ({prog})"
+        if _SCRIPT.fullmatch(prog):
+            return (UNSURE, f"passed to {prog}") if holder else (LOCAL, f"piped to local script {prog}")
+        return UNSURE, f"passed to {prog}"
+
+    def _fallback(self, cmd, why):
+        for rx, name in ((re.compile(r"(?<![\w./-])(curl|wget|nc|ssh|scp|rsync|sftp|ftp|tg-notify|"
+                                     r"sendme|sendmail|mail)(?![\w.-])"), "network or message"),
+                         (re.compile(r"\bgit\b[^\n;&|]*\b(push|commit|clone|fetch|pull)\b"), "git"),
+                         (re.compile(r"\bgh\s+(?:pr|issue)\b"), "gh")):
+            m = rx.search(cmd)
+            if m:
+                return OUTWARD, f"{name} ({m.group(1) if m.groups() else m.group(0)}) in an {why}"
+        return UNSURE, why
+
+    # -- tool calls
+    def classify_call(self, tool, inp, ph, cwd):
+        """(class, sink) for a secret placeholder in a tool call's (redacted) input."""
+        if not isinstance(inp, dict):
+            return (UNSURE, f"{tool} input") if tool not in LOCAL_TOOLS else (LOCAL, f"{tool} input")
+        if tool in ("Bash", "Monitor"):
+            cmd = inp.get("command")
+            if isinstance(cmd, str) and ph in cmd:
+                return self.classify_bash(cmd, ph, cwd)
+            others = {k: v for k, v in inp.items() if k != "command"}
+            if _holds(others, ph) and set(k for k, v in others.items() if _holds(v, ph)) <= {
+                    "description"}:
+                return LOCAL, f"{tool} description"
+            return UNSURE, f"secret not located in the {tool} input"
+        if tool in FILE_WRITE_TOOLS:
+            path_field, fields = FILE_WRITE_TOOLS[tool]
+            written = [inp.get(f) for f in fields]
+            if tool == "MultiEdit" and isinstance(inp.get("edits"), list):
+                written = [e.get("new_string") for e in inp["edits"] if isinstance(e, dict)]
+            if _holds(written, ph):
+                return self.classify_path(inp.get(path_field), cwd, tool)
+            if _holds(inp, ph):
+                return LOCAL, f"{tool} input (not written: old text or path)"
+            return UNSURE, f"secret not located in the {tool} input"
+        if tool in OUTWARD_TOOLS:
+            return OUTWARD, OUTWARD_TOOLS[tool]
+        if tool.startswith("mcp__"):
+            action = tool.rsplit("__", 1)[-1]
+            return (OUTWARD if _MCP_SENDS.search(action) else UNSURE), f"MCP {tool}"
+        if tool in ("Agent", "Task"):
+            if inp.get("isolation") == "remote":
+                return UNSURE, f"{tool} prompt to a remote agent"
+            return LOCAL, f"{tool} prompt (a subagent on this machine)"
+        if tool == "SendMessage":
+            return UNSURE, f"message to another session ({inp.get('to') or '?'})"
+        if tool in LOCAL_TOOLS:
+            return LOCAL, f"{tool} input"
+        return UNSURE, f"unknown tool {tool}"
+
+
+def one_line(text):
+    return re.sub(r"[ \t]*\r?\n\s*", " ⏎ ", text.strip())
+
+
+def call_detail(tool, inp):
+    """The command, path or URL behind a tool call, from its redacted input."""
+    if not isinstance(inp, dict):
+        return ""
+    for k in ("command", "file_path", "notebook_path", "url", "query", "path", "pattern", "to"):
+        if isinstance(inp.get(k), str) and inp[k].strip():
+            return inp[k]
+    return json.dumps(inp, ensure_ascii=False)
+
+
+_PATHISH = re.compile(r"[\w.~@-]*[/.][\w./~@-]*")
+
+
+def context_paths(tool, inp):
+    """The file paths a tool call names: its path fields, or a command's path-like words."""
+    if not isinstance(inp, dict):
+        return []
+    paths = [inp[k] for k in ("file_path", "notebook_path", "path") if isinstance(inp.get(k), str)]
+    cmd = inp.get("command")
+    if isinstance(cmd, str):
+        for w in re.split(r"[\s'\"=;|&<>()]+", cmd):
+            if w and "://" not in w and "[REDACTED:" not in w and not w.startswith("-") \
+                    and _PATHISH.fullmatch(w) and not re.fullmatch(r"[\d.]+", w):
+                paths.append(w)
+    return paths
+
+
+_FIXTURE_PATH = re.compile(r"(?:^|/)(?:tests?|__tests__|fixtures?|__fixtures__|testdata|spec)(?:/|$)"
+                           r"|(?:^|/)[^/]*(?:\.test\.|_test\.|\.spec\.)[^/]*$|(?:^|/)test_[^/]*\.py$")
+_DOC_PATH = re.compile(r"(?:^|/)(?:README[^/]*|docs?/.*|[^/]*\.(?:md|mdx|rst|txt|adoc))$", re.I)
+_PUBLIC_CLIENT_FILES = ("google-services.json", "GoogleService-Info.plist")
+_GENERIC_KINDS = {"env-secret", "config-secret", "bearer-token", "url-password"}
+DEMOTION_KINDS = {  # kind -> what the reason says; EXEMPT ones never alert, even outward
+    "test-fixture": "test fixture", "names-list": "a list of secret names, not a value",
+    "local-ipc-token": "CLAUDE_CODE_MESSAGING_TOKEN, a local per-session IPC token",
+    "public-client-key": "public-by-design client key",
+    "test-key": "test-mode key", "public-project-key": "PostHog project key, public by design",
+    "user-pasted": "the user pasted it into their own prompt",
+    "aws-key-id-alone": "an AWS access key ID with no secret key beside it",
+    "placeholder": "placeholder"}
+EXEMPT_OUTWARD = {"test-fixture", "names-list"}
+
+
+def _entropy_per_char(v):
+    n = len(v)
+    counts = {}
+    for c in v:
+        counts[c] = counts.get(c, 0) + 1
+    return -sum(k / n * math.log2(k / n) for k in counts.values())
+
+
+def demotion(kind, value, name, occurrences):
+    """(key, reason) when a secret is test data, public by design or not a real value;
+    None otherwise. occurrences carry "paths", "file_tool", "user_pasted", "companions"."""
+    paths = [p for o in occurrences for p in o.get("paths", ())]
+    file_paths = [p for o in occurrences if o.get("file_tool") for p in o.get("paths", ())]
+    fixture = [p for p in paths if _FIXTURE_PATH.search(p)]
+    if fixture and not any(not _FIXTURE_PATH.search(p) for p in file_paths):
+        return "test-fixture", f"test fixture (seen with {fixture[0]})"
+    if kind in _GENERIC_KINDS and re.fullmatch(r"[(\[{'\"]*[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+[)\]}'\",]*",
+                                               value):
+        return "names-list", DEMOTION_KINDS["names-list"]
+    if name and name.upper() == "CLAUDE_CODE_MESSAGING_TOKEN":
+        return "local-ipc-token", DEMOTION_KINDS["local-ipc-token"]
+    if kind == "google-api-key":
+        pub = [p for p in paths if os.path.basename(p) in _PUBLIC_CLIENT_FILES]
+        if pub:
+            return "public-client-key", f"public-by-design Firebase client key ({os.path.basename(pub[0])})"
+    if kind == "stripe-test-key":
+        return "test-key", "Stripe test-mode key"
+    if kind == "posthog-project-key":
+        return "public-project-key", DEMOTION_KINDS["public-project-key"]
+    if any(o.get("user_pasted") for o in occurrences):
+        return "user-pasted", DEMOTION_KINDS["user-pasted"]
+    if kind == "aws-access-key" and not any(
+            {"env-secret", "config-secret"} & set(o.get("companions", ())) for o in occurrences):
+        return "aws-key-id-alone", DEMOTION_KINDS["aws-key-id-alone"]
+    docs = [p for p in paths if _DOC_PATH.search(p)]
+    where = " in README/docs text" if docs else ""
+    if kind in _GENERIC_KINDS and len(value) < 16:
+        return "placeholder", f"placeholder{where}: implausibly short value (under 16 chars)"
+    if _entropy_per_char(value) < 3.0 or re.fullmatch(r"[A-Za-z]+(?:[-_ .][A-Za-z]+)*", value):
+        return "placeholder", f"placeholder{where}: low-entropy value"
+    return None
+
+
+def summarize_secrets(exposed, red, globs, memory):
+    """Group occurrences into distinct secrets (one per placeholder: the same value has the
+    same placeholder all run). Each gets its class (the most outward of its occurrences in
+    sessions not allowlisted), its demotion, and whether it counts toward the alert: an
+    outward secret that isn't allowlisted and isn't a test fixture or names-list."""
+    by_ph = {}
+    for o in exposed:
+        by_ph.setdefault(o["placeholder"], []).append(o)
+    out = []
+    for ph, occ in by_ph.items():
+        live = [o for o in occ if not allowlisted(o["cwd"], globs)]
+        cls = LOCAL
+        for o in live:
+            cls = _worst((cls, ""), (o["class"], ""))[0]
+        value = red.value_of(ph)
+        dem = demotion(occ[0]["type"], value, red.name_of(ph), occ)
+        counts = bool(live) and cls != LOCAL and (dem is None or dem[0] not in EXEMPT_OUTWARD)
+        digest = memory.digest(value) if memory else None
+        sessions = []
+        for o in occ:
+            if (o["session"], o["cwd"]) not in sessions:
+                sessions.append((o["session"], o["cwd"]))
+        out.append({
+            "placeholder": ph, "type": occ[0]["type"], "class": cls,
+            "demotion": dem[0] if dem else None, "demotion_reason": dem[1] if dem else None,
+            "counts": counts, "allowlisted": not live,
+            "repeat": memory is not None and memory.alerted_recently(digest),
+            "_digest": digest, "sessions": sessions,
+            "occurrences": [{k: o[k] for k in ("t", "session", "cwd", "where", "tool", "class",
+                                               "sink", "detail")} for o in occ]})
+    order = {OUTWARD: 0, UNSURE: 1, LOCAL: 2}
+    out.sort(key=lambda s: (not s["counts"], order[s["class"]], s["placeholder"]))
+    return out
 
 
 # ---------------------------------------------------------------- helpers
@@ -363,17 +914,28 @@ def clip(s, n):
     return s[:n] + f" …[+{len(s) - n} chars]"
 
 
-def result_text(content):
+def result_text(content, dropped=None):
+    """The text of a tool result. A block that isn't text is shown as a short marker;
+    when dropped is a list, those blocks (except tool references) are appended to it so
+    the caller can count them and scan them for secrets."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
         parts = []
         for c in content:
-            if isinstance(c, dict):
-                if c.get("type") == "text":
-                    parts.append(c.get("text", ""))
-                elif c.get("type") == "image":
-                    parts.append("[image]")
+            if not isinstance(c, dict):
+                continue
+            ct = c.get("type")
+            if ct == "text":
+                parts.append(c.get("text", "") if isinstance(c.get("text"), str) else "")
+            elif ct == "image":
+                parts.append("[image]")
+            elif ct == "tool_reference":
+                parts.append(f"[tool: {c.get('tool_name') or '?'}]")
+            else:
+                parts.append(f"[{ct or 'untyped'} block not shown]")
+                if dropped is not None:
+                    dropped.append(c)
         return " ".join(parts)
     return "" if content is None else str(content)
 
@@ -531,38 +1093,72 @@ def queued_message(att):
             prompt, TEXT_LIMIT)
 
 
-def read_session(path: Path, cutoff: dt.datetime, red: Redactor):
+SCANNED_TYPES = ("user", "assistant", "attachment", "system", "queue-operation")
+# The system prompt and the tool, skill and agent catalogs: written by the harness, not
+# by anything an agent did, and the bulk of a transcript's attachment bytes.
+HARNESS_ATTACHMENTS = {"prompt_snapshot", "skill_listing", "deferred_tools_record",
+                       "deferred_tools_delta", "agent_listing_delta", "mcp_instructions_delta"}
+
+
+def read_session(path: Path, cutoff: dt.datetime, red: Redactor, sinks=None):
     """Return (meta, events) for entries at/after cutoff. Every string is redacted
-    before it is clipped; meta["exposed"] lists each secret once per session.
-    meta["brief"] is the first user prompt when it predates the cutoff, "in-window"
-    when it doesn't, or None when the transcript has none."""
+    before it is clipped. meta["exposed"] lists every occurrence of a secret: where it
+    appeared, the tool and the command, path or URL behind it, and where it went (see
+    SinkClassifier). meta["dropped"] counts what was read but couldn't be shown: lines
+    that don't parse, entries without a usable timestamp, tool-result blocks that aren't
+    text. meta["brief"] is the first user prompt when it predates the cutoff,
+    "in-window" when it doesn't, or None when the transcript has none. A transcript that
+    can't be opened raises OSError."""
+    sinks = sinks or SinkClassifier()
     meta = {"file": red.clean(str(path)), "cwd": None,
             "subagent": "subagents" in path.parts, "session": red.clean(path.stem),
-            "exposed": [], "brief": None}
+            "exposed": [], "brief": None, "dropped": {}}
     events = []
     pending = {}  # tool_use_id -> event index, to pair results with calls
-    seen = set()
+    written = {}  # placeholder -> the not-ignored repo files this session wrote it to
     sid_seen = False
     brief_found = False
 
-    def note(hits, t, where):
-        for kind, ph in hits:
-            if ph not in seen:
-                seen.add(ph)
-                meta["exposed"].append({"t": t, "type": kind, "where": where,
-                                        "placeholder": ph})
+    def drop(what):
+        meta["dropped"][what] = meta["dropped"].get(what, 0) + 1
 
-    try:
-        fh = path.open(encoding="utf-8", errors="replace")
-    except OSError:
-        return meta, events
+    def note(hits, t, where, tool=None, cls=LOCAL, sink=None, detail="", paths=(),
+             file_tool=False, user_pasted=False, classify=None, skip=()):
+        """Record each placeholder in hits once for this entry. classify(ph) -> (class,
+        sink) overrides cls and sink per placeholder."""
+        kinds = {k for k, _ in hits}
+        done = set(skip)
+        for kind, ph in hits:
+            if ph in done:
+                continue
+            done.add(ph)
+            c, s = classify(ph) if classify else (cls, sink)
+            meta["exposed"].append({
+                "t": t, "type": kind, "placeholder": ph, "where": where, "tool": tool,
+                "class": c, "sink": s or where,
+                "detail": red.clip(one_line(detail), SINK_DETAIL_LIMIT) if detail else "",
+                "paths": list(paths), "file_tool": file_tool, "user_pasted": user_pasted,
+                "companions": sorted(kinds - {kind})})
+        return done
+
+    def scan(value, t, where, skip=()):
+        """Secrets in a part of an entry that the timeline doesn't show."""
+        if value is None or value == [] or value == {}:
+            return set()
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        return note(red.redact(text.replace("\r", ""))[1], t, where, skip=skip)
+
+    fh = path.open(encoding="utf-8", errors="replace")
     with fh:
         for line in fh:
             try:
                 e = json.loads(line)
             except json.JSONDecodeError:
+                if line.strip():
+                    drop("unparsable line")
                 continue
             if not isinstance(e, dict):
+                drop("line that is not a JSON object")
                 continue
             if not meta["cwd"] and isinstance(e.get("cwd"), str):
                 meta["cwd"] = red.clean(e["cwd"])
@@ -582,33 +1178,57 @@ def read_session(path: Path, cutoff: dt.datetime, red: Redactor):
                         meta["brief"] = {"t": when, "text": red.clip(first, BRIEF_LIMIT)}
                     else:
                         meta["brief"] = "in-window"
-            if ts is None or ts < cutoff:
+            if ts is None:
+                if role in SCANNED_TYPES:
+                    drop(f"{role} entry without a usable timestamp")
+                continue
+            if ts < cutoff:
                 continue
             t = ts.astimezone().strftime("%H:%M:%S")
+            ecwd = e.get("cwd") if isinstance(e.get("cwd"), str) else None
             if role == "attachment":
-                queued = queued_message(e.get("attachment"))
+                att = e.get("attachment")
+                queued = queued_message(att)
                 if queued:
                     label, text, limit = queued
                     label, hits = red.clip(label, 80), []
                     text = (red.clip(text, limit, hits) if text.strip()
                             else "(queued message with no readable text)")
-                    note(hits, t, f"queued message ({label})")
+                    human = label == "USER (queued)" and not meta["subagent"]
+                    note(hits, t, f"queued message ({label})", user_pasted=human)
                     events.append({"t": t, "kind": "queued", "label": label, "text": text})
+                else:
+                    kind = att.get("type") if isinstance(att, dict) else None
+                    if kind not in HARNESS_ATTACHMENTS:
+                        scan(att, t, f"attachment ({red.clip(str(kind or '?'), 60)})")
+                continue
+            if role == "system":
+                scan({k: v for k, v in e.items() if k in ("content", "prompt")}, t,
+                     f"system entry ({red.clip(str(e.get('subtype') or '?'), 60)})")
+                continue
+            if role == "queue-operation":
+                scan(e.get("content"), t, "queue operation")
                 continue
             if role not in ("user", "assistant"):
                 continue
             msg = e.get("message") or {}
             content = msg.get("content")
-            label = "user prompt" if role == "user" else "agent text"
+            if role == "user" and e.get("isMeta"):
+                label = "harness text"
+            else:
+                label = "user prompt" if role == "user" else "agent text"
+            pasted = label == "user prompt" and not meta["subagent"]
+            done = set()
             if isinstance(content, str):
                 if content.strip():
                     text, hits = red.redact(content)
                     text = red.clip(text, TEXT_LIMIT, hits)
-                    note(hits, t, label)
+                    done |= note(hits, t, label, user_pasted=pasted)
                     events.append({"t": t, "kind": role, "text": text})
-                continue
+                content = []
             if not isinstance(content, list):
-                continue
+                content = []
+            result_tool, raw_results = None, []
             for c in content:
                 if not isinstance(c, dict):
                     continue
@@ -616,25 +1236,68 @@ def read_session(path: Path, cutoff: dt.datetime, red: Redactor):
                 if ct == "text" and isinstance(c.get("text"), str) and c["text"].strip():
                     text, hits = red.redact(c["text"])
                     text = red.clip(text, TEXT_LIMIT, hits)
-                    note(hits, t, label)
+                    done |= note(hits, t, label, user_pasted=pasted)
                     events.append({"t": t, "kind": role, "text": text})
                 elif ct == "tool_use":
                     tool = red.clean(str(c.get("name")))
                     hits = []
-                    inp = red.clip(red.deep(c.get("input"), hits), INPUT_LIMIT, hits)
-                    note(hits, t, f"tool call input ({tool})")
+                    red_inp = red.deep(c.get("input"), hits)
+                    inp = red.clip(red_inp, INPUT_LIMIT, hits)
+                    detail = call_detail(tool, red_inp)
+                    paths = context_paths(tool, red_inp)
+                    file_tool = tool in ("Read", "NotebookRead") or tool in FILE_WRITE_TOOLS
+
+                    def classify(ph, tool=tool, red_inp=red_inp):
+                        try:
+                            return sinks.classify_call(tool, red_inp, ph, ecwd or meta["cwd"])
+                        except Exception as ex:  # a classifier bug never reads as LOCAL
+                            return UNSURE, f"sink classification failed ({type(ex).__name__})"
+                    before = len(meta["exposed"])
+                    done |= note(hits, t, f"tool call input ({tool})", tool=tool, detail=detail,
+                                 paths=paths, file_tool=file_tool, classify=classify)
+                    for o in meta["exposed"][before:]:
+                        if tool in FILE_WRITE_TOOLS and o["class"] != LOCAL:
+                            written.setdefault(o["placeholder"], []).append(o)
+                        elif tool == "Bash" and o["sink"].startswith("written by Bash") \
+                                and o["class"] != LOCAL:
+                            written.setdefault(o["placeholder"], []).append(o)
+                    if tool in ("Bash", "Monitor") and isinstance(red_inp, dict) and \
+                            re.search(r"\bgit\b[^\n;&|]*\bcommit\b", str(red_inp.get("command"))):
+                        for ph, writes in written.items():
+                            w = writes[-1]
+                            meta["exposed"].append(dict(
+                                w, t=t, where=f"tool call input ({tool})", tool=tool,
+                                **{"class": OUTWARD}, sink=f"git commit after it was written "
+                                f"by {w['tool']} ({w['detail']})",
+                                detail=red.clip(one_line(detail), SINK_DETAIL_LIMIT)))
                     pending[c.get("id")] = len(events)
-                    events.append({"t": t, "kind": "call", "tool": tool,
-                                   "input": inp})
+                    events.append({"t": t, "kind": "call", "tool": tool, "input": inp,
+                                   "_detail": detail, "_paths": paths, "_file": file_tool})
                 elif ct == "tool_result":
-                    tool = (events[pending[c["tool_use_id"]]]["tool"]
-                            if c.get("tool_use_id") in pending else None)
-                    txt, hits = red.redact(result_text(c.get("content")))
+                    call_ev = (events[pending[c["tool_use_id"]]]
+                               if c.get("tool_use_id") in pending else {})
+                    tool = call_ev.get("tool")
+                    result_tool = tool
+                    dropped = []
+                    raw_results.append(result_text(c.get("content"), dropped))
+                    txt, hits = red.redact(raw_results[-1])
                     shown = red.clip(txt, RESULT_LIMIT, hits)
-                    note(hits, t, f"tool result ({tool or '?'})")
+                    for b in dropped:
+                        drop(f"tool-result block of type {red.clip(str(b.get('type')), 40)} "
+                             "(scanned for secrets, not shown)")
+                        red.deep(b, hits)
+                    done |= note(hits, t, f"tool result ({tool or '?'})", tool=tool,
+                                 sink=f"{tool or 'tool'} output",
+                                 detail=call_ev.get("_detail", ""),
+                                 paths=call_ev.get("_paths", ()),
+                                 file_tool=call_ev.get("_file", False))
                     events.append({"t": t, "kind": "result",
                                    "error": bool(c.get("is_error")), "for": tool,
                                    "text": shown, "_full": txt[:5000]})
+            if "toolUseResult" in e:  # its stdout and the like repeat the result text
+                extra = [x for x in _strings(e["toolUseResult"])
+                         if x.strip() and not any(x in r for r in raw_results)]
+                scan(extra, t, f"structured tool result ({result_tool or '?'})", skip=done)
     return meta, events
 
 
@@ -1071,7 +1734,7 @@ def main():
                     "a MEDIUM/HIGH/CRITICAL finding or a FLAGGED verdict whose findings "
                     "don't all parse as LOW (LOW-only findings don't alert; with --no-llm, "
                     "a blocked-action pattern hit), a secret not "
-                    "alerted in the last day is exposed, the review is incomplete, the "
+                    "alerted in the last day went outward, the review is incomplete, the "
                     "self-check failed or the run errored; repeatable. {alert} = one-line "
                     "alert (verdict, finding counts, host, report path), {report} = report "
                     "path, {verdict} = verdict")
@@ -1096,6 +1759,80 @@ def main():
                 "verdict": "ERROR", "report": "(none written)"}):
             print(f"ERROR: {p}", file=sys.stderr)
     return rc
+
+
+def list_transcripts(projects, cutoff, red, problems, notes):
+    """The transcripts modified since cutoff, oldest first. A folder or file that can't be
+    read is a FILE-SKIPPED problem, so the window is retried; a file deleted while listing
+    is noted."""
+    files, vanished = [], 0
+
+    def unreadable(ex):
+        problems.append(("FILE-SKIPPED", red.clip(
+            f"transcript folder unreadable: {ex.filename}: {type(ex).__name__}", 500)))
+    for dirpath, _, names in os.walk(projects, onerror=unreadable):
+        for name in names:
+            if not name.endswith(".jsonl"):
+                continue
+            f = Path(dirpath) / name
+            try:
+                mtime = dt.datetime.fromtimestamp(f.stat().st_mtime, dt.timezone.utc)
+            except FileNotFoundError:
+                vanished += 1
+                continue
+            except OSError as ex:
+                problems.append(("FILE-SKIPPED", red.clip(
+                    f"transcript skipped: {f}: stat failed ({type(ex).__name__})", 500)))
+                continue
+            if mtime >= cutoff:
+                files.append((mtime, f))
+    if vanished:
+        notes.append(f"{vanished} transcript(s) deleted while being listed")
+    return [f for _, f in sorted(files)]
+
+
+LOCAL_SHOWN = 5  # LOCAL occurrences listed per secret; outward ones are all listed
+
+
+def secrets_section(live, spared):
+    """The report's secret section: one entry per distinct secret, with where each
+    occurrence went. Placeholders and redacted, clipped commands only."""
+    def occurrence(o):
+        return (f"    - {o['t']} {o['session'][:8]} ({o['cwd'] or '?'}) {o['where']} -> "
+                f"{o['class']} {o['sink']}" + (f": {o['detail']}" if o["detail"] else ""))
+
+    def entry(x):
+        via = next((o["sink"] for o in x["occurrences"] if o["class"] == x["class"]), "")
+        head = (f"- {x['placeholder']} {x['type']}: {x['class']}"
+                + (f" via {via}" if x["class"] != LOCAL else "")
+                + (f"; demoted: {x['demotion_reason']}" if x["demotion"] else "")
+                + ("; repeat: already alerted in the last 24h" if x["counts"] and x["repeat"]
+                   else "; new" if x["counts"] else "")
+                + "; sessions: " + ", ".join(f"{s[:8]} ({c or '?'})" for s, c in x["sessions"]))
+        out = [o for o in x["occurrences"] if o["class"] != LOCAL]
+        local = [o for o in x["occurrences"] if o["class"] == LOCAL]
+        lines = [head] + [occurrence(o) for o in out + local[:LOCAL_SHOWN]]
+        if len(local) > LOCAL_SHOWN:
+            lines.append(f"    - (+{len(local) - LOCAL_SHOWN} more LOCAL occurrences)")
+        return "\n".join(lines)
+
+    counted = [x for x in live if x["counts"]]
+    demoted = [x for x in live if not x["counts"] and x["demotion"]]
+    local = [x for x in live if not x["counts"] and not x["demotion"]]
+    block = (f"\n## Secrets: {len(live)} distinct, {len(counted)} outward (deterministic; only a "
+             "secret that went outward, and isn't a test fixture or a list of names, flags the "
+             "run)\n### Outward: these count toward the alert\n"
+             + ("\n".join(map(entry, counted)) or "- none"))
+    if demoted:
+        block += ("\n### Demoted: test data, public by design or not a real value; listed, "
+                  "not alerted\n" + "\n".join(map(entry, demoted)))
+    if local:
+        block += ("\n### Local only: entered the transcript and the model's context, not sent "
+                  "anywhere\n" + "\n".join(map(entry, local)))
+    if spared:
+        block += ("\n\n## Secrets in allowlisted sessions (reported only: they don't flag the "
+                  "run or alert)\n" + "\n".join(map(entry, spared)))
+    return block
 
 
 def run(args, red, host):
@@ -1125,49 +1862,43 @@ def run(args, red, host):
                 fh.write(f"{now.isoformat()} ERROR {msg}\n")
         print(f"ERROR: {msg}", file=sys.stderr)
         return 1
-    files = []
-    for f in projects.rglob("*.jsonl"):
-        try:
-            mtime = dt.datetime.fromtimestamp(f.stat().st_mtime, dt.timezone.utc)
-        except OSError:
-            continue
-        if mtime >= cutoff:
-            files.append((mtime, f))
-    files = [f for _, f in sorted(files)]
-
     # (kind, text): anything that leaves the window not fully reviewed
     problems = []
+    files = list_transcripts(projects, cutoff, red, problems, notes)
+
     sections, all_flags, exposed = [], [], []
+    dropped = {}
     known = set()  # the 8-char session ids reviewed, for the finding dedupe
+    sinks = SinkClassifier()
     for f in files:
         try:
-            meta, events = read_session(f, cutoff, red)
+            meta, events = read_session(f, cutoff, red, sinks)
         except Exception as ex:
             problems.append(("FILE-SKIPPED", red.clip(f"transcript skipped: {f}: {ex!r}", 500)))
             continue
-        if not events:
-            continue
         if args.project and args.project.lower() not in (str(f) + str(meta["cwd"])).lower():
+            continue
+        for k, n in meta["dropped"].items():
+            dropped[k] = dropped.get(k, 0) + n
+        exposed += [dict(x, session=meta["session"], cwd=meta["cwd"]) for x in meta["exposed"]]
+        if not events:
             continue
         fl = flag_events(events, red)
         all_flags += [(meta["session"], meta["cwd"]) + x for x in fl]
-        exposed += [dict(x, session=meta["session"], cwd=meta["cwd"]) for x in meta["exposed"]]
         sections.append(render(meta, events))
         known.add(meta["session"][:8].lower())
+    if dropped:
+        notes.append("read but not shown: " + ", ".join(
+            f"{n} {k}" for k, n in sorted(dropped.items())))
 
     globs = load_allowlist(audit_dir(), notes)
-    for x in exposed:
-        x["allowlisted"] = allowlisted(x["cwd"], globs)
-    live = [x for x in exposed if not x["allowlisted"]]
-    spared = [x for x in exposed if x["allowlisted"]]
-    memory = AlertMemory(sd, now, notes) if sd and live else None
-    fresh = set()  # digests of the secrets this run alerts on (None: dedupe is off)
-    for x in live:
-        d = memory.digest(red.value_of(x["placeholder"])) if memory else None
-        x["repeat"] = memory is not None and memory.alerted_recently(d)
-        if not x["repeat"]:
-            fresh.add(d)
-    repeats = sum(x["repeat"] for x in live)
+    memory = AlertMemory(sd, now, notes) if sd and exposed else None
+    distinct = summarize_secrets(exposed, red, globs, memory)
+    live = [x for x in distinct if not x["allowlisted"]]
+    spared = [x for x in distinct if x["allowlisted"]]
+    counted = [x for x in live if x["counts"]]  # outward, not exempt: flags the run
+    fresh = {x["_digest"] for x in counted if not x["repeat"]}  # None: dedupe is off
+    repeats = sum(x["repeat"] for x in counted)
     ask_log = ask_log_section(cutoff, now, red, notes) if sections else ""
     reviewing = bool(sd) and not args.no_llm and bool(sections)
     findings = FindingMemory(sd, now, notes) if reviewing else None
@@ -1175,17 +1906,10 @@ def run(args, red, host):
     local = lambda d: d.astimezone().strftime("%Y-%m-%d %H:%M")
     header = (f"# Claude Code session audit\nwindow: {local(cutoff)} → {local(now)}  |  "
               f"sessions: {len(sections)}  |  pattern hits: {len(all_flags)}  |  "
-              f"secrets exposed: {len(live)}"
+              f"secrets: {len(live)} distinct, {len(counted)} outward"
               + (f" (+{len(spared)} allowlisted)" if spared else "") + "\n"
               + "".join(f"note: {red.clean(n)}\n" for n in notes))
-    entry = lambda x: (f"- SECRET-EXPOSED {x['t']} {x['session'][:8]} ({x['cwd'] or '?'}) "
-                       f"{x['type']} in {x['where']}: {x['placeholder']}"
-                       + (" (repeat: already alerted in the last 24h)" if x.get("repeat") else ""))
-    secret_block = "\n## Secrets exposed (deterministic; any one flags the run)\n" + (
-        "\n".join(entry(x) for x in live) or "- none")
-    if spared:
-        secret_block += ("\n\n## Secrets exposed in allowlisted sessions (reported only: "
-                         "they don't flag the run or alert)\n" + "\n".join(entry(x) for x in spared))
+    secret_block = secrets_section(live, spared)
     flag_block = "\n## Pattern hits (automatic, may be false positives)\n" + (
         "\n".join(f"- {t} {', '.join(fl)} — {sess[:8]} ({cwd or '?'}) {tool}: {snip}"
                   for sess, cwd, t, fl, tool, snip in all_flags) or "- none")
@@ -1199,7 +1923,7 @@ def run(args, red, host):
         return 3 if problems else 0
 
     log = sd / "audit.log"
-    if not sections and not problems:
+    if not sections and not problems and not distinct:
         line = (f"{now.isoformat()} no activity since {cutoff.isoformat()} "
                 f"(files={len(files)})" + "".join(f"; {red.clean(n)}" for n in notes) + "\n")
         guard("audit.log", line)
@@ -1259,15 +1983,16 @@ def run(args, red, host):
     blocked_unreviewed = verdict == "UNREVIEWED" and any(
         "BLOCKED" in x[3] or "AFTER-BLOCK" in x[3] for x in all_flags)
     flagged = verdict in ("FLAGGED", "CRITICAL") or blocked_unreviewed
-    # LOW-only findings and repeat secrets flag the report but don't alert.
+    # LOW-only findings and repeat secrets flag the report but don't alert. A secret
+    # that never left the machine, or a fixture or names-list one, does neither.
     should_alert = model_alert or blocked_unreviewed or bool(fresh) or bool(problems)
-    if live:
+    if counted:
         verdict = max(verdict, "FLAGGED", key=RANK.index)
         flagged = True
 
     alert_counts = {}
-    if live:
-        alert_counts["SECRET-EXPOSED"] = len(live)
+    if counted:
+        alert_counts["SECRET-EXPOSED"] = len(counted)
     if repeats:
         alert_counts["REPEAT"] = repeats
     if spared:
@@ -1291,7 +2016,8 @@ def run(args, red, host):
                   f"## Review\n{review}\n{flag_block}\n\n"
                   f"Full timeline: {timeline_file}\n")
     log_line = (f"{now.isoformat()} {verdict} sessions={len(sections)} "
-                f"hits={len(all_flags)} secrets={len(live)} repeats={repeats} "
+                f"hits={len(all_flags)} secrets={len(live)} outward={len(counted)} "
+                f"repeats={repeats} "
                 f"repeat_findings={repeat_findings} "
                 f"allowlisted={len(spared)} problems={len(problems)} "
                 f"alert={('yes' if args.on_flag else 'none-configured') if should_alert else 'no'} "
