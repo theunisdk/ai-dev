@@ -115,6 +115,12 @@ def result(tid, text, m=10):
         {"type": "tool_result", "tool_use_id": tid, "content": text}]}}
 
 
+def queued(prompt, kind="human", m=10, **origin):
+    return {"type": "attachment", "timestamp": ts(m), "attachment": {
+        "type": "queued_command", "prompt": prompt, "commandMode": "prompt",
+        "origin": dict(origin, kind=kind)}}
+
+
 STUB_CLAUDE = r'''#!/usr/bin/env python3
 import os, sys
 data = sys.stdin.read()
@@ -164,7 +170,8 @@ class Fixture:
     def env(self, **extra):
         env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
         env.update(CLAUDE_CONFIG_DIR=str(self.root / "claude"), CLAUDE_AUDIT_DIR=str(self.audit),
-                   HOME=str(self.root / "home"), STUB_CAPTURE=str(self.capture),
+                   HOME=str(self.root / "home"), XDG_STATE_HOME=str(self.root / "state"),
+                   STUB_CAPTURE=str(self.capture),
                    STUB_ALERTS=str(self.alerts), PYTHONDONTWRITEBYTECODE="1")
         env.update(extra)
         return env
@@ -1185,6 +1192,240 @@ class RedactorTest(unittest.TestCase):
                   "BYPASS=enabled12345", "token = self.get_token(scope)",
                   "  password: ${DB_PASSWORD}"]:
             self.assertEqual(audit.find_secrets(t), [], t)
+
+
+class GraderContextTest(unittest.TestCase):
+    """The model sees each session's brief, the messages queued mid-turn and the
+    ask-on-block log lines from the window, all redacted."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(self.tmp.name)
+        self.secret = "gh" + "p_" + rnd(36)
+        self.state = self.fx.root / "state"
+        self.state.mkdir()
+
+    def tearDown(self):
+        for p in [self.fx.root, *self.fx.root.rglob("*")]:
+            p.chmod(0o700)
+        self.tmp.cleanup()
+
+    def model_input(self, p):
+        self.assertIn(p.returncode, (0, 2), p.stderr)
+        text = self.fx.read(self.fx.capture)
+        self.assertNotIn(self.secret, self.fx.everything(p))
+        self.assertNotIn(self.secret[:12], self.fx.everything(p))
+        return text
+
+    def report(self):
+        [r] = [v for k, v in self.fx.files().items()
+               if k.startswith("reports/") and not k.endswith("_timeline.md")]
+        return r
+
+    def test_brief_from_before_the_window_reaches_the_model_redacted(self):
+        long_tail = "x" * 3000
+        write_session(self.fx.projects, [
+            user(f"BRIEF-MARKER fix the login bug, token {self.secret} {long_tail}", m=180),
+            call("old", "OLD-CALL-MARKER", m=170), result("old", "ok", m=170),
+            call("c", "ls", m=10), result("c", "ok", m=10)])
+        text = self.model_input(self.fx.run())
+        self.assertRegex(text, r"brief \(first user prompt, \d{4}-\d\d-\d\d \d\d:\d\d, before "
+                         r"this window\): BRIEF-MARKER fix the login bug, token "
+                         r"\[REDACTED:github-token#1\] x+ …\[\+\d+ chars\]")
+        self.assertNotIn("OLD-CALL-MARKER", text)  # only the brief comes from before the window
+
+    def test_brief_skips_meta_tool_results_and_local_commands(self):
+        meta = dict(user("META-MARKER skill text", m=200), isMeta=True)
+        local = user("<local-command-stdout>LOCAL-MARKER</local-command-stdout>", m=195)
+        write_session(self.fx.projects, [
+            meta, local, result("x", "RESULT-MARKER", m=190), user("REAL-BRIEF ship it", m=185),
+            call("c", "ls", m=10), result("c", "ok", m=10)])
+        text = self.model_input(self.fx.run())
+        self.assertIn("before this window): REAL-BRIEF ship it", text)
+        for marker in ("META-MARKER", "LOCAL-MARKER", "RESULT-MARKER"):
+            self.assertNotIn(marker, text)
+
+    def test_brief_in_window_is_not_repeated_and_a_missing_one_is_said(self):
+        write_session(self.fx.projects, [user("IN-WINDOW-BRIEF go", m=10), agent("ok", m=9)],
+                      cwd="/home/dev/a")
+        write_session(self.fx.projects, [agent("NO-PROMPT-SESSION", m=10)], cwd="/home/dev/b")
+        text = self.model_input(self.fx.run())
+        self.assertEqual(text.count("IN-WINDOW-BRIEF"), 1)
+        self.assertIn("USER: IN-WINDOW-BRIEF go", text)
+        self.assertIn("brief: (no user prompt found in the transcript)", text)
+
+    def test_queued_messages_reach_the_model_redacted(self):
+        write_session(self.fx.projects, [
+            user("deploy it", m=12),
+            call("c", "kubectl apply", m=11),
+            result("c", "The user doesn't want to proceed with this tool use.", m=11),
+            queued(f"Oops. Miss click {self.secret}", m=10),
+            queued("<cross-session-message from-name=\"pm\">raw</cross-session-message>",
+                   kind="peer", m=9, name="1234-PM-x", body="GO for PR 12"),
+            queued("<task-notification>\n<task-id>b1</task-id>\n<status>killed</status>\n"
+                   "<summary>Agent \"review\" was stopped</summary>\n</task-notification>",
+                   kind="task-notification", m=8),
+            queued("", m=7),
+            {"type": "attachment", "timestamp": ts(7),
+             "attachment": {"type": "skill_listing", "content": "SKILL-LISTING-MARKER"}},
+            queued("TOO-OLD-MARKER", m=200)])
+        p = self.fx.run()
+        text = self.model_input(p)
+        self.assertRegex(text, r"\d\d:\d\d:\d\d USER \(queued\): Oops\. Miss click "
+                         r"\[REDACTED:github-token#1\]")
+        self.assertRegex(text, r"\d\d:\d\d:\d\d PEER 1234-PM-x: GO for PR 12")
+        self.assertRegex(text, r"\d\d:\d\d:\d\d TASK \[killed\]: Agent \"review\" was stopped")
+        self.assertIn("USER (queued): (queued message with no readable text)", text)
+        self.assertNotIn("SKILL-LISTING-MARKER", text)
+        self.assertNotIn("TOO-OLD-MARKER", text)
+        # a secret in a queued message is an exposure like any other user text
+        self.assertRegex(self.report(), r"SECRET-EXPOSED .* github-token in queued message "
+                         r"\(USER \(queued\)\)")
+
+    def write_ask_log(self, *lines):
+        (self.state / "ask-on-block.log").write_text("".join(l + "\n" for l in lines))
+
+    def ask_ts(self, minutes_ago):
+        t = dt.datetime.now() - dt.timedelta(minutes=minutes_ago)
+        return t.strftime("%Y-%m-%d %H:%M:%S")
+
+    def test_ask_log_lines_in_the_window_reach_the_model_redacted(self):
+        self.write_ask_log(f"{self.ask_ts(120)} asked: OLD-ASK-MARKER",
+                           f"{self.ask_ts(5)} asked: deploy to dev; token {self.secret}",
+                           "garbage line", "")
+        write_session(self.fx.projects, [user("go", m=10), agent("ok", m=10)])
+        p = self.fx.run()
+        text = self.model_input(p)
+        self.assertIn("### ask-on-block log", text)
+        self.assertRegex(text, r"\n\d\d:\d\d:\d\d asked: deploy to dev; token "
+                         r"\[REDACTED:github-token#1\]")
+        self.assertNotIn("OLD-ASK-MARKER", text)
+        self.assertIn("note: ask-on-block log: 1 unparseable line(s) left out of the review",
+                      self.report())
+
+    def test_ask_log_missing_empty_and_unreadable_are_told_apart(self):
+        write_session(self.fx.projects, [user("go", m=10), agent("ok", m=10)])
+        text = self.model_input(self.fx.run("--since", "1h"))
+        self.assertIn("(no log on this machine: nothing has been asked this way)", text)
+
+        self.write_ask_log(f"{self.ask_ts(120)} asked: old")
+        self.fx.capture.unlink()
+        text = self.model_input(self.fx.run("--since", "1h"))
+        self.assertIn("(no entries in this window)", text)
+
+        (self.state / "ask-on-block.log").chmod(0)
+        self.fx.capture.unlink()
+        p = self.fx.run("--since", "1h")
+        text = self.model_input(p)
+        self.assertIn("(log unreadable this run: whether a blocked call was asked is unknown)", text)
+        report = sorted(k for k in self.fx.files() if k.startswith("reports/")
+                        and not k.endswith("_timeline.md"))[-1]
+        self.assertIn("ask-on-block log", self.fx.files()[report].split("**VERDICT")[0])
+        self.assertIn("unreadable (PermissionError)", self.fx.files()[report])
+
+
+class FindingDedupeTest(unittest.TestCase):
+    """A (session, category) model finding alerts once a day; a repeat is listed in
+    the report but does not count toward the alert."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(self.tmp.name)
+        self.sid = write_session(self.fx.projects, [user("go", m=10), call("c", "ls", m=10),
+                                                    result("c", "ok", m=10)])
+        self.s8 = self.sid[:8]
+
+    def tearDown(self):
+        for p in self.fx.audit.rglob("*"):
+            p.chmod(0o700)
+        self.tmp.cleanup()
+
+    def finding(self, sev="HIGH", cat="out-of-scope", sess=None):
+        return f"- [{sev}] [{cat}] session={sess or self.s8} 12:00:00 proj — did X\n  evidence: CALL Bash: ls"
+
+    def run_review(self, *findings, verdict="FLAGGED"):
+        before = len(self.fx.alert_lines()) if self.fx.alerts.exists() else 0
+        p = self.fx.run("--since", "1h", STUB_MODE="raw",
+                        STUB_REVIEW=f"VERDICT: {verdict}\nsummary\n" + "\n".join(findings))
+        self.assertIn(p.returncode, (0, 2), p.stderr)
+        after = len(self.fx.alert_lines()) if self.fx.alerts.exists() else 0
+        return after > before
+
+    def last_report(self):
+        files = self.fx.files()
+        return files[sorted(k for k in files if k.startswith("reports/")
+                            and not k.endswith("_timeline.md"))[-1]]
+
+    def test_repeat_is_listed_but_does_not_alert(self):
+        self.assertTrue(self.run_review(self.finding()))
+        state = json.loads((self.fx.audit / "findings.json").read_text())
+        self.assertEqual(list(state), [f"{self.s8}:out-of-scope"])
+        self.assertFalse(self.run_review(self.finding()))
+        report = self.last_report()
+        self.assertIn("did X (REPEAT: this session and category already alerted", report)
+        self.assertIn("note: 1 model finding(s) repeat a session and category", report)
+        self.assertIn("repeat_findings=1", self.fx.read(self.fx.audit / "audit.log"))
+        # a repeat CRITICAL verdict alone does not alert either
+        self.assertFalse(self.run_review(self.finding(), verdict="CRITICAL"))
+
+    def test_new_category_or_higher_severity_still_alerts(self):
+        self.assertTrue(self.run_review(self.finding(sev="MEDIUM")))
+        self.assertTrue(self.run_review(self.finding(sev="MEDIUM"), self.finding(cat="red-line")))
+        self.assertTrue(self.run_review(self.finding(sev="HIGH")))  # escalation
+        self.assertFalse(self.run_review(self.finding(sev="MEDIUM"), self.finding(cat="red-line")))
+        # a repeat next to a fresh LOW stays quiet; next to a fresh MEDIUM it alerts
+        self.assertFalse(self.run_review(self.finding(), self.finding(sev="LOW", cat="other")))
+        self.assertTrue(self.run_review(self.finding(), self.finding(sev="MEDIUM", cat="other")))
+
+    def test_untagged_or_unknown_session_findings_count_as_new(self):
+        self.assertTrue(self.run_review(self.finding()))
+        for f in ["- [HIGH] 12:00 session=" + self.s8 + " no category",
+                  self.finding(cat="made-up"), self.finding(sess="deadbeef")]:
+            self.assertTrue(self.run_review(f), f)
+            self.assertIn("lack a known [category] or a session= from this run", self.last_report())
+
+    def test_unreadable_history_alerts_and_says_so(self):
+        self.fx.audit.mkdir()
+        (self.fx.audit / "findings.json").write_text("{not json")
+        self.assertTrue(self.run_review(self.finding()))
+        self.assertFalse(self.run_review(self.finding()))  # rewritten after the alert
+        (self.fx.audit / "findings.json").write_text("{not json")
+        self.assertTrue(self.run_review(self.finding()))
+        self.assertIn("finding dedupe off: findings.json unreadable (JSONDecodeError)",
+                      self.last_report())
+
+    def test_unwritable_history_is_logged(self):
+        self.fx.audit.mkdir()
+        (self.fx.audit / "findings.json").mkdir()  # can be neither read nor replaced
+        self.assertTrue(self.run_review(self.finding()))
+        self.assertIn("finding dedupe off: findings.json unreadable", self.last_report())
+        self.assertRegex(self.fx.read(self.fx.audit / "audit.log"),
+                         r"DEDUPE-FAILED could not write findings\.json \(\w+Error\); "
+                         r"these model findings alert again next run")
+        self.assertTrue(self.run_review(self.finding()))
+
+    def test_old_entries_expire(self):
+        self.fx.audit.mkdir()
+        old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=25)).isoformat()
+        (self.fx.audit / "findings.json").write_text(json.dumps(
+            {f"{self.s8}:out-of-scope": {"t": old, "sev": "LOW"}}))
+        self.assertTrue(self.run_review(self.finding(sev="LOW"), self.finding(sev="MEDIUM", cat="other")))
+        state = json.loads((self.fx.audit / "findings.json").read_text())
+        self.assertNotEqual(state[f"{self.s8}:out-of-scope"]["t"], old)
+
+    def test_prompt_carries_rubric_and_sanctioned_procedures(self):
+        prompt = audit.REVIEW_PROMPT
+        for needle in ("[ask-approval]", "claude-spawn", ".claude/worktrees/", "GO",
+                       'tmux kill-session -t "=<exact name>"', "pkill -f", "killall",
+                       "fuser -k", "tmux kill-server", "git worktree remove --force",
+                       "--token", "SUPABASE_ACCESS_TOKEN", "VERCEL_TOKEN", "gh pr merge",
+                       "retry-changed", "CRITICAL:", "HIGH:", "MEDIUM:", "LOW:",
+                       "session=<first 8 characters", "USER (queued)", "PEER", "TASK [status]"):
+            self.assertIn(needle, prompt)
+        self.assertNotIn("Reading, printing or sending secrets", prompt)
+        for c in audit.CATEGORIES:
+            self.assertIn(c, prompt)
+
 
 
 if __name__ == "__main__":
