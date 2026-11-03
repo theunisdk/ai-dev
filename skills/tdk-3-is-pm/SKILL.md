@@ -203,8 +203,15 @@ Send GO only when **all** of these hold:
     prints `0`), and CodeRabbit left no review or comment on the PR (the reviews command above, and
     `gh api 'repos/<owner>/<repo>/issues/<n>/comments?per_page=100' -q '[.[]|select(.user.login=="coderabbitai[bot]")]|length'`
     prints `0`). Any CodeRabbit status, review or comment means it is installed; the rows here apply.
-  - `Review rate limited`, `Review in progress`, any other description, or no `CodeRabbit` status
-    otherwise — never a pass. CodeRabbit has not reviewed this head.
+  - `Review rate limited` in a repo with the review kit — passes only when the line the worker's
+    exit-7 check printed is `pre-pr-review: /review — verdict <sha> covers HEAD` naming the head,
+    with no `incomplete`, `fallback` or `secrets: not_scanned` from its last `/review`, you confirm it from the first line of
+    `<repo>/.claude/worktrees/<task>/.review/verdict.md` (`# Review verdict — <branch> — <short-sha>
+    — <date>`; gitignored, so not on GitHub) with `<short-sha>` at least 4 hex characters and a
+    prefix of `headRefOid`, and every finding is dispositioned: the kit's, and CodeRabbit's from
+    earlier heads. A missing, unreadable or malformed header holds GO; send it back.
+  - `Review rate limited` in a repo without the kit, `Review in progress`, any other description, or
+    no `CodeRabbit` status otherwise — never a pass. CodeRabbit has not reviewed this head.
 - any review object you rely on as evidence is on the head SHA. A verdict on an older commit says
   nothing about what you are about to merge. Older review objects are history and fail nothing: a
   clean incremental pass on the head leaves `Review completed` and no new review object.
@@ -215,14 +222,16 @@ Send GO only when **all** of these hold:
   because every step was skipped is not a pass.
 - the worker reported `ACTIONABLE: 0` with head state `REVIEWED`, `SKIPPED` on a PR that passed
   the skip check above, or `CodeRabbit: not installed` on a PR that passed that check, along with
-  its dispositions. `ACTIONABLE: 0` with `RATE LIMITED` or
-  `UNKNOWN` is not a pass. A count above 0 passes only when every remaining item is tagged
-  `in the review body: no thread` and the worker answered each one, as (b) or (c), in a PR comment.
+  its dispositions. `ACTIONABLE: <n>` with `RATE LIMITED` passes only on a PR that passed the
+  rate-limit check above; elsewhere it is not a pass, and `UNKNOWN` never is. A count above 0
+  passes only when every remaining item is tagged `in the review body: no thread` and the worker
+  answered each one, as (b) or (c), in a PR comment.
 - the report carries the `pre-pr-review:` line, the `review-postmortem:` first line, the `record`
   line after `scored` or `no-local-verdict`, and the `review-tune:` line. Any outcome passes,
   `failed` included: the postmortem is measurement. A missing line holds GO; ask for it.
   `pre-pr-review: stale` holds GO; send it back to review the head. Carry any `pre-pr-review: fallback` or `incomplete`, `failed`, `NOT posted`,
-  `NOT written`, `review-tune: unknown` or `review-tune: due` into the Step 7 digest.
+  `NOT written`, `review-tune: unknown` or `review-tune: due` into the Step 7 digest, and name
+  any PR that merged on a `RATE LIMITED` head.
 
 No review object at all is not a failure — CodeRabbit creates one only when it has findings. The
 status description above is what confirms a clean pass.
