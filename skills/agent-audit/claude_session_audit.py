@@ -408,7 +408,7 @@ _LATER_OUTWARD = re.compile(
     r"sendme|telegram-send|sendmail|mail|mailx|mutt|msmtp)(?![\w.-])"
     r"|\bgit\b[^\n;&|]{0,200}?\b(push|commit|tag|notes)\b"
     r"|\bgh\b[^\n;&|]{0,80}?\b(pr|issue|api|gist|secret|release)\b")
-_INDIRECT = re.compile(r"\$[A-Za-z_{(]|`|<\(|(?:^|[\s;&|])[{(](?=\s)|\bprintf\s+-v\b"
+_INDIRECT = re.compile(r"\$[A-Za-z_{(]|`|<\(|(?:^|[\s;&|])(?:\(|\{(?=\s))|\bprintf\s+-v\b"
                        r"|\b(?:while|for|until|do|read|xargs|source|eval|mapfile|readarray)\b")
 CODE_FLAGS = {"python": {"-c"}, "python3": {"-c"}, "node": {"-e", "-p", "--eval", "--print"},
               "bun": {"-e", "-p", "--eval", "--print"}, "deno": {"eval"}, "ruby": {"-e"},

