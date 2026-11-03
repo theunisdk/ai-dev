@@ -408,13 +408,15 @@ _LATER_OUTWARD = re.compile(
     r"sendme|telegram-send|sendmail|mail|mailx|mutt|msmtp)(?![\w.-])"
     r"|\bgit\b[^\n;&|]{0,200}?\b(push|commit|tag|notes)\b"
     r"|\bgh\b[^\n;&|]{0,80}?\b(pr|issue|api|gist|secret|release)\b")
-_INDIRECT = re.compile(r"[$`({]|\b(?:while|for|until|do|read|xargs|source|eval|mapfile|readarray)\b"
-                       r"|\s-v\s")
+_INDIRECT = re.compile(r"\$[A-Za-z_{(]|`|<\(|(?:^|[\s;&|])[{(](?=\s)|\bprintf\s+-v\b"
+                       r"|\b(?:while|for|until|do|read|xargs|source|eval|mapfile|readarray)\b")
 CODE_FLAGS = {"python": {"-c"}, "python3": {"-c"}, "node": {"-e", "-p", "--eval", "--print"},
               "bun": {"-e", "-p", "--eval", "--print"}, "deno": {"eval"}, "ruby": {"-e"},
               "perl": {"-e", "-E"}, "php": {"-r"}, "bash": {"-c"}, "sh": {"-c"}, "zsh": {"-c"},
               "dash": {"-c"}, "pwsh": {"-c", "-Command"}, "powershell": {"-c", "-Command"}}
-_OPT_WITH_ARG = {"-W", "-X", "-I", "-r", "-M", "-o", "-O", "--require", "--import"}
+_OPT_WITH_ARG = {"python": {"-W", "-X"}, "python3": {"-W", "-X"}, "ruby": {"-I", "-r"},
+                 "perl": {"-I", "-M"}, "node": {"-r", "--require", "--import"},
+                 "bun": {"-r", "--require"}, "bash": {"-o", "-O"}, "sh": {"-o"}, "zsh": {"-o"}}
 _INPLACE = {"sed", "gsed", "perl", "ruby", "awk", "gawk"}
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
 _HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][\w.-]*)\1")
@@ -564,7 +566,7 @@ def _interpreter_args(prog, words, i):
         if w == "-m" and prog in ("python", "python3"):
             return "script", j + 1 if j + 1 < len(words) else None
         if w.startswith("-") and not w.startswith("__HEREDOC_"):
-            j += 2 if w in _OPT_WITH_ARG else 1
+            j += 2 if w in _OPT_WITH_ARG.get(prog, ()) else 1
         elif w.startswith("__HEREDOC_"):
             j += 1
         else:
@@ -741,8 +743,9 @@ class SinkClassifier:
             return result
         if re.search(r"/dev/(?:tcp|udp)/", cmd):
             return UNSURE, "network (/dev/tcp) in the same command"
-        m = _LATER_OUTWARD.search(cmd, cmd.find(ph))
-        if m and (_INDIRECT.search(cmd) or any(f in cmd[m.start():] for f in files)):
+        pos = cmd.find(ph)
+        m = _LATER_OUTWARD.search(cmd, pos)
+        if m and (_INDIRECT.search(cmd) or any(cmd.count(f, pos) >= 2 for f in files)):
             word = next(g for g in m.groups() if g)
             return UNSURE, f"{word} later in a command that carries it through a variable, file or loop"
         return result
@@ -783,6 +786,8 @@ class SinkClassifier:
                 if not files:
                     return UNSURE, f"in-place edit by {prog} of a file that can't be named"
                 sink = (LOCAL, f"local command ({prog})")
+                if _NET_CODE.search(seg):
+                    sink = (UNSURE, f"{prog} code that can reach the network")
                 for path in files:
                     sink = _worst(sink, self.classify_path(path, base, f"written by Bash ({prog} -i)"))
                 return sink
@@ -795,11 +800,15 @@ class SinkClassifier:
             if mode in ("code", "stdin"):
                 if _NET_CODE.search(seg):
                     return UNSURE, f"{prog} code that can reach the network"
+                if mode == "stdin" and not holder and prog in ("bash", "sh", "zsh", "dash"):
+                    return UNSURE, f"piped into {prog} as code"
                 return LOCAL, f"inline {prog} code"
             script = words[k] if k is not None else ""
             in_args = any(ph in w for w in full[:i] + full[i + 1:] if w not in bodies_of(words, full))
             if in_args or via_env:
                 return UNSURE, f"passed to {prog} {script}".strip()
+            if _NET_CODE.search(seg):
+                return UNSURE, f"piped to {prog} {script} with a network-looking argument"
             return LOCAL, f"piped to local {prog} script {script}".strip()
         if prog == "eval" and depth < 3:
             inner = " ".join(full[i + 1:])
