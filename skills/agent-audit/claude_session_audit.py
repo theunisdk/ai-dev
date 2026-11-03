@@ -429,7 +429,9 @@ _OPT_WITH_ARG = {"python": {"-W", "-X"}, "python3": {"-W", "-X"}, "ruby": {"-I",
                  "bun": {"-r", "--require"}, "bash": {"-o", "-O"}, "sh": {"-o"}, "zsh": {"-o"}}
 _INPLACE = {"sed", "gsed", "perl", "ruby", "awk", "gawk"}
 NET_CODE_OUT = "network code written out with the secret"
-NET_CODE_FILED = "network code saved to a local file with the secret (not run in this command)"
+NET_CODE_FILED = "network code saved to a temp file with the secret"
+_PLAIN_WRITERS = {"cat", "tee", "printf", "echo"}
+_TEMP_DIRS = tuple(dict.fromkeys(os.path.join(d, "") for d in ("/tmp", "/var/tmp", tempfile.gettempdir())))
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
 _HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][\w.-]*)\1")
 _SCRIPT = re.compile(r"[^/]*/.*|[^/]*\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|php)")
@@ -765,9 +767,13 @@ class SinkClassifier:
                     sink = _worst(sink, self.classify_path(target, base, "written by Bash"))
                 if holder and (targets or any(w.startswith("__HEREDOC_") for w in words)) \
                         and _NET_CODE.search(" ".join(full)):
-                    saved = targets and words is pipe[-1]  # into a file, not piped on
+                    saved = (prog in _PLAIN_WRITERS and words is pipe[-1] and targets and all(
+                        (self.resolve(t, base) or "").startswith(_TEMP_DIRS) for t in targets))
                     sink = _worst(sink, (UNSURE, NET_CODE_FILED if saved else NET_CODE_OUT))
-                result = sink if result is None else _worst(result, sink)
+                if result == (UNSURE, NET_CODE_FILED) and sink[0] == UNSURE:
+                    result = sink  # any other reason beats the guess from code text
+                else:
+                    result = sink if result is None else _worst(result, sink)
                 fed = True
         if not found:
             return UNSURE, "secret not located in the parsed command"
@@ -989,7 +995,7 @@ DEMOTION_KINDS = {  # kind -> what the reason says; EXEMPT ones never alert, eve
     "aws-key-id-alone": "an AWS access key ID with no secret key beside it",
     "placeholder": "placeholder"}
 EXEMPT_OUTWARD = {"test-fixture", "names-list"}  # test-fixture only for writes and commits of fixtures
-# A placeholder only saved into a local file beside network code: nothing was sent.
+# A guess from code text, not a send: a placeholder alerts only on a sink the parse follows.
 PLACEHOLDER_QUIET_SINKS = {NET_CODE_FILED}
 
 
@@ -1079,7 +1085,7 @@ def summarize_secrets(exposed, red, globs, memory):
         filed = dem is not None and dem[0] == "placeholder" and bool(outward) and all(
             o["sink"] in PLACEHOLDER_QUIET_SINKS for o in outward)
         if filed:
-            dem = (dem[0], dem[1] + "; only saved to a local file, not sent")
+            dem = (dem[0], dem[1] + "; only saved to a temp file beside network code")
         exempt = dem is not None and (dem[0] == "names-list" or filed or dem[0] == "test-fixture"
                                       and fixture_ok and all(o.get("fixture_sink") for o in outward))
         counts = bool(live) and cls not in QUIET_CLASSES and not exempt
@@ -1793,9 +1799,13 @@ LOOSE_SEVERITY_RES = [re.compile(p, re.I) for p in (
     r"\bseverity\W{0,3}(?:CRITICAL|HIGH|MEDIUM|LOW)\b",
     r"\|\s*(?:CRITICAL|HIGH|MEDIUM|LOW)\s*\|")]
 _SEV_WORD = re.compile(r"\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b", re.I)
-# Beside a session=: "(high)", "high severity". A bare word ("high-volume") is prose.
-TAGGED_SEVERITY_RE = re.compile(r"\(\s*(?:CRITICAL|HIGH|MEDIUM|LOW)\s*\)"
-                                r"|\b(?:CRITICAL|HIGH|MEDIUM|LOW)[ \t]+severity\b", re.I)
+# Beside a session=: "(high)", "high severity", "High:", "HIGH", "session=1a2b3c4d high".
+# A word in prose ("high-volume", "a high rate") is not a severity.
+TAGGED_SEVERITY_RES = [
+    re.compile(r"\(\s*(?:CRITICAL|HIGH|MEDIUM|LOW)\s*\)|\b(?:CRITICAL|HIGH|MEDIUM|LOW)[ \t]+severity\b"
+               r"|\b(?:CRITICAL|HIGH|MEDIUM|LOW)[ \t]*[:—–]|\bsession[ \t]*=[ \t]*[0-9a-f]{8}\W{0,4}"
+               r"(?:CRITICAL|HIGH|MEDIUM|LOW)(?![\w-])", re.I),
+    re.compile(r"(?<![\w-])(?:CRITICAL|HIGH|MEDIUM|LOW)(?![\w-])")]
 URGENT = ("CRITICAL", "HIGH")  # severities that alert at once; the rest wait for the digest
 
 
@@ -1813,7 +1823,8 @@ def loose_severity(line):
 def tagged_severity(line):
     """The highest severity a session= line states: loosely written, "(high)" or "high
     severity"; None for a severity word that is only prose."""
-    return loose_severity(line) or _highest(" ".join(TAGGED_SEVERITY_RE.findall(line)))
+    return loose_severity(line) or _highest(" ".join(m.group(0) for rx in TAGGED_SEVERITY_RES
+                                                      for m in rx.finditer(line)))
 
 
 # One finding line, as the prompt asks for it: "- [HIGH] [red-line] session=1a2b3c4d ..."
@@ -1832,7 +1843,7 @@ def parse_review(review, known=(), memory=None):
     """Split one batch's review into finding entries. An entry starts, at any indentation,
     at a "- [SEV] [category]" line, a line with a severity written loosely, a list item
     carrying session=<8 hex>, or an indented line carrying both session= and a stated
-    severity ("(high)", "high severity"); other lines are evidence or prose. Only a
+    severity ("(high)", "High:", "HIGH"); other lines are evidence or prose. Only a
     bracketed entry for a session in known gets a dedupe key. Returns (the review with
     repeats marked, entries, the model's summary line, the number of list items at any
     indent that are not entries). Each entry: sev (None when no known severity can be
