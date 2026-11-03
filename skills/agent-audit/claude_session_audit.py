@@ -14,7 +14,8 @@ so an hourly cron job has no gaps or overlaps.
      and the window's ask-on-block log lines
   3. Replaces every secret it recognises with a placeholder such as
      [REDACTED:github-token#2], and records every place each one appeared and where
-     it went: LOCAL (it only entered the transcript), OUTWARD (a network command,
+     it went: LOCAL (it only entered the transcript), STORED (put into a secret
+     store: gh secret set, doppler secrets set, ...), OUTWARD (a network command,
      git push or commit, gh pr/issue body, WebFetch, an MCP send, a write to a
      git-tracked file) or OUTWARD-UNSURE (it may have left; counts as outward).
      Test fixtures, placeholders, public client keys and the like are demoted, with
@@ -28,20 +29,25 @@ Nothing the script writes, prints or sends carries a recognised secret. Before a
 of that it scans its own output once more; a hit there means the redaction missed
 something, so it writes nothing, alerts, and exits 3.
 
-Alerts stay rare. The --on-flag commands run only for a secret that went outward
-(and isn't a test fixture or a list of names) and wasn't alerted in the last day,
-an incomplete review, a failed self-check or an error, or a model review
-worth reading: a CRITICAL verdict, a MEDIUM, HIGH or CRITICAL finding, or a FLAGGED
-verdict whose findings don't all parse as LOW (with --no-llm, a [BLOCKED] or
-[AFTER-BLOCK] pattern hit stands in for the review). A run whose findings are all
-LOW still writes its report with the true verdict and counts, but sends nothing. A
-model finding whose session and category already alerted in the last day (at the
-same or a higher severity) is marked REPEAT in the report and doesn't count;
-CRITICAL findings and verdicts always count.
-A secret that stayed local is listed in the report but doesn't flag or alert.
-Secrets found only in sessions whose cwd matches a glob in ~/.claude-audit/allow are
-reported but don't flag or alert, and a secret alerts at most once a day
+Alerts stay rare. The --on-flag commands run at once only for what needs the user: a
+secret that went outward (and isn't a fake-looking test fixture or a list of names)
+and wasn't alerted in the last day, a fresh HIGH or CRITICAL model finding or one
+whose severity can't be read, a CRITICAL verdict, a FLAGGED verdict with no finding
+that parses (with --no-llm, a [BLOCKED] or [AFTER-BLOCK] pattern hit stands in for
+the review), or an incomplete review, failed self-check or error, which alerts when
+it first shows and then at most once a day while it lasts. The alert names each
+thing: the secret's type, placeholder, sink, project and session, or the finding's
+one-liner, project and session. A model finding whose session and category already
+alerted in the last day (at the same or a higher severity) is marked REPEAT in the
+report and doesn't count; CRITICAL findings and verdicts always count.
+Everything else (MEDIUM and LOW findings, repeats, local, stored and demoted secrets,
+problems that already alerted) goes into one daily digest, sent through the same
+commands by the first scheduled run at or after 05:00 UTC (--digest-hour), even on a
+quiet day. Each scheduled run appends a redacted record to ~/.claude-audit/digest.jsonl
+for it. Secrets found only in sessions whose cwd matches a glob in ~/.claude-audit/allow
+are reported but don't flag or alert, and a secret alerts at most once a day
 (remembered as an HMAC under a per-machine key, never the value).
+
 
 Usage:
   claude_session_audit.py                    # since last run (first run: last hour)
@@ -59,6 +65,7 @@ the window is retried next run) or the redaction self-check failed (nothing
 written), 1 error. 3 wins over 2: the report and the alert carry the verdict.
 """
 import argparse
+import collections
 import datetime as dt
 import fnmatch
 import hashlib
@@ -344,10 +351,13 @@ def guard(where, *texts):
 # ---------------------------------------------------------------- secret sinks
 # Where each occurrence of a secret went. LOCAL: it only entered the transcript (and so
 # the model's context). OUTWARD: a tool or command sent it off the machine, or into a
-# file git can publish. OUTWARD-UNSURE: it may have; it counts as outward. Anything the
-# classifier can't work out lands in OUTWARD-UNSURE, never LOCAL.
-LOCAL, OUTWARD, UNSURE = "LOCAL", "OUTWARD", "OUTWARD-UNSURE"
-_CLASS_RANK = (LOCAL, UNSURE, OUTWARD)
+# file git can publish. STORED: a command put it into a secret store (gh secret set,
+# doppler secrets set, ...), its intended home; listed, never alerted. OUTWARD-UNSURE: it
+# may have left; it counts as outward. Anything the classifier can't work out lands in
+# OUTWARD-UNSURE, never LOCAL.
+LOCAL, STORED, OUTWARD, UNSURE = "LOCAL", "STORED", "OUTWARD", "OUTWARD-UNSURE"
+_CLASS_RANK = (LOCAL, STORED, UNSURE, OUTWARD)
+QUIET_CLASSES = (LOCAL, STORED)  # never count toward an alert
 SINK_DETAIL_LIMIT = 200
 
 LOCAL_TOOLS = {
@@ -425,6 +435,30 @@ _SEPARATORS = {";", "&&", "||", "&", "\n", ";;"}
 _OPERATORS = ("&>>", "<<<", "&&", "||", ";;", "|&", ">>", "<<", "&>", ">|", ">&", "<&", "<>",
               ";", "&", "|", "(", ")", "<", ">", "\n")
 _REDIRECTS = {">", ">>", "&>", "&>>", ">|", "1>", "2>"}
+# program -> [(subcommand words, a flag that must also be present, or None)]
+SECRET_STORES = {
+    "gh": [(("secret", "set"), None), (("auth", "login"), "--with-token")],
+    "doppler": [(("secrets", "set"), None)],
+    "vercel": [(("env", "add"), None)],
+    "supabase": [(("secrets", "set"), None)],
+    "docker": [(("login",), "--password-stdin")],
+    "podman": [(("login",), "--password-stdin")],
+    "aws": [(("ssm", "put-parameter"), None)],
+    "gcloud": [(("secrets", "versions", "add"), None)],
+    "firebase": [(("functions:secrets:set",), None)]}
+
+
+def _secret_store(prog, words, i):
+    """The secret-store command ("gh secret set") a simple command runs, or None. The
+    subcommand starts within the first three words that aren't flags, so a flag value
+    or two (gh -R o/r, aws --profile p) may come first."""
+    args = words[i + 1:]
+    positional = [k for k, w in enumerate(args) if not w.startswith("-")]
+    for sub, flag in SECRET_STORES.get(prog, ()):
+        for k in positional[:3]:
+            if tuple(args[k:k + len(sub)]) == sub and (flag is None or flag in args):
+                return " ".join((prog,) + sub)
+    return None
 
 
 def _worst(a, b):
@@ -739,12 +773,13 @@ class SinkClassifier:
     def _backstop(self, cmd, ph, result, files):
         """At least OUTWARD-UNSURE when an outward command follows the secret and the
         command passes data in a way the parse doesn't follow."""
-        if result[0] != LOCAL:
+        if result[0] not in QUIET_CLASSES:
             return result
         if re.search(r"/dev/(?:tcp|udp)/", cmd):
             return UNSURE, "network (/dev/tcp) in the same command"
         pos = cmd.find(ph)
-        m = _LATER_OUTWARD.search(cmd, pos)
+        m = next((m for m in _LATER_OUTWARD.finditer(cmd, pos)  # gh secret set is the store
+                  if not (result[0] == STORED and m.group(3) == "secret")), None)
         if m and (_INDIRECT.search(cmd) or any(cmd.count(f, pos) >= 2 for f in files)):
             word = next(g for g in m.groups() if g)
             return UNSURE, f"{word} later in a command that carries it through a variable, file or loop"
@@ -758,6 +793,9 @@ class SinkClassifier:
             return OUTWARD, f"network ({prog})"
         if prog in MSG_PROGS:
             return OUTWARD, f"message ({prog})"
+        store = _secret_store(prog, words, i)
+        if store:
+            return STORED, f"secret store ({store})"
         if prog == "git":
             sub, nxt = _git_sub(words, i)
             if sub in GIT_OUTWARD:
@@ -993,7 +1031,23 @@ def demotion(kind, value, name, occurrences):
     return None
 
 
+# Values published as examples in vendor docs; a fixture may use them.
+_DOC_EXAMPLES = ("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+_FAKE_MARKERS = re.compile(r"fake|test|example|dummy|sample|mock|placeholder|changeme|notreal|"
+                           r"redacted|xxxx|0000|1234|abcd", re.I)
+
+
+def looks_fake(value):
+    """Whether a value reads as made up: a published doc example, a marker word, a long
+    run of one character or a short repeated chunk, or low entropy. A random-looking
+    value is treated as real."""
+    return (any(x in value for x in _DOC_EXAMPLES) or _FAKE_MARKERS.search(value) is not None
+            or re.search(r"(.)\1{5,}|(.{2,8})\2{3,}", value) is not None
+            or _entropy_per_char(value) < 3.5)
+
+
 def summarize_secrets(exposed, red, globs, memory):
+
     """Group occurrences into distinct secrets (one per placeholder: the same value has the
     same placeholder all run). Each gets its class (the most outward of its occurrences in
     sessions not allowlisted), its demotion, and whether it counts toward the alert: an
@@ -1009,9 +1063,15 @@ def summarize_secrets(exposed, red, globs, memory):
             cls = _worst((cls, ""), (o["class"], ""))[0]
         value = red.value_of(ph)
         dem = demotion(occ[0]["type"], value, red.name_of(ph), occ)
-        exempt = dem is not None and (dem[0] == "names-list" or dem[0] == "test-fixture" and all(
-            o.get("fixture_sink") for o in live if o["class"] != LOCAL))
-        counts = bool(live) and cls != LOCAL and not exempt
+        if dem and dem[0] == "test-fixture" and cls not in QUIET_CLASSES and not looks_fake(value):
+            dem = (dem[0], dem[1] + "; the value looks real, so writing or committing it counts")
+            fixture_ok = False
+        else:
+            fixture_ok = True
+        exempt = dem is not None and (dem[0] == "names-list" or dem[0] == "test-fixture" and fixture_ok
+                                      and all(o.get("fixture_sink") for o in live
+                                              if o["class"] not in QUIET_CLASSES))
+        counts = bool(live) and cls not in QUIET_CLASSES and not exempt
         digest = memory.digest(value) if memory else None
         sessions = []
         for o in occ:
@@ -1022,10 +1082,11 @@ def summarize_secrets(exposed, red, globs, memory):
             "demotion": dem[0] if dem else None, "demotion_reason": dem[1] if dem else None,
             "counts": counts, "allowlisted": not live,
             "repeat": memory is not None and memory.alerted_recently(digest),
-            "_digest": digest, "sessions": sessions,
+            "_digest": digest, "_id": memory.record_id(value) if memory else None,
+            "sessions": sessions,
             "occurrences": [{k: o[k] for k in ("t", "session", "cwd", "where", "tool", "class",
                                                "sink", "detail")} for o in occ]})
-    order = {OUTWARD: 0, UNSURE: 1, LOCAL: 2}
+    order = {OUTWARD: 0, UNSURE: 1, STORED: 2, LOCAL: 3}
     out.sort(key=lambda s: (not s["counts"], order[s["class"]], s["placeholder"]))
     return out
 
@@ -1197,6 +1258,22 @@ class AlertMemory:
     def alerted_recently(self, digest):
         return digest is not None and digest in self.seen
 
+    def record_id(self, value):
+        """A short id for the digest's distinct counts, derived apart from the alert
+        digest so neither can be matched to the other."""
+        if self.key is None:
+            return None
+        return hmac.new(self.key, b"digest-record\0" + value.encode("utf-8", "surrogatepass"),
+                        hashlib.sha256).hexdigest()[:16]
+
+    def save_key(self):
+        """Write a new key (O_EXCL: a key another run just wrote is not overwritten)."""
+        if self.new_key:
+            fd = os.open(self.key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(self.key.hex() + "\n")
+            self.new_key = False
+
     def remember(self, digests):
         """Record digests as alerted now; return an error text, or None."""
         digests = [d for d in digests if d is not None]
@@ -1205,11 +1282,7 @@ class AlertMemory:
         self.seen.update({d: self.now.isoformat() for d in digests})
         f = self.key_file
         try:
-            if self.new_key:  # O_EXCL: a key another run just wrote is not overwritten
-                fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(fd, "w") as fh:
-                    fh.write(self.key.hex() + "\n")
-                self.new_key = False
+            self.save_key()
             f = self.state_file
             _write_private(f, json.dumps(self.seen, sort_keys=True).encode())
         except OSError as ex:
@@ -1698,51 +1771,107 @@ def verdict_of(review):
 
 
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
-FINDING_RE = re.compile(r"^[ \t]*[-*][ \t]*\[[ \t]*([A-Za-z]+)[ \t]*\]", re.M)
 
 
-def severity_counts(review):
-    """Count the model's findings by severity. Only fixed labels come out of this,
-    never the model's own words."""
-    counts = {}
-    for m in FINDING_RE.finditer(review):
-        sev = m.group(1).upper()
-        sev = sev if sev in SEVERITIES else "OTHER"
-        counts[sev] = counts.get(sev, 0) + 1
-    return counts
+# A severity written loosely: "- **[HIGH]**", "[Medium-High]", "1. High:", "- (medium)",
+# "Severity: HIGH", "| HIGH |".
+LOOSE_SEVERITY_RES = [re.compile(p, re.I) for p in (
+    r"\[[^\]\n]{0,40}\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b[^\]\n]{0,40}\]",
+    r"^[ \t]*(?:(?:[-*•+]|\d+[.)])[ \t]*)?(?:[(*_`]+[ \t]*)?(?:CRITICAL|HIGH|MEDIUM|LOW)(?![\w-])",
+    r"\bseverity\W{0,3}(?:CRITICAL|HIGH|MEDIUM|LOW)\b",
+    r"\|\s*(?:CRITICAL|HIGH|MEDIUM|LOW)\s*\|")]
+_SEV_WORD = re.compile(r"\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b", re.I)
+URGENT = ("CRITICAL", "HIGH")  # severities that alert at once; the rest wait for the digest
 
 
-# A higher severity written loosely: "- **[HIGH]**", "[Medium-High]", "1. High:",
-# "- (medium)", "Severity: HIGH", "| HIGH |".
-LOOSE_SEVERITY_RES = [re.compile(p, re.I | re.M) for p in (
-    r"\[[^\]\n]{0,40}\b(?:CRITICAL|HIGH|MEDIUM)\b[^\]\n]{0,40}\]",
-    r"^[ \t]*(?:(?:[-*•+]|\d+[.)])[ \t]*)?(?:[(*_`]+[ \t]*)?(?:CRITICAL|HIGH|MEDIUM)(?![\w-])",
-    r"\bseverity\W{0,3}(?:CRITICAL|HIGH|MEDIUM)\b",
-    r"\|\s*(?:CRITICAL|HIGH|MEDIUM)\s*\|")]
+def _highest(text):
+    found = {w.upper() for w in _SEV_WORD.findall(text)}
+    return next((s for s in SEVERITIES if s in found), None)
 
 
-def batch_alerts(verdict, review):
-    """Whether one batch's review is worth an alert: a CRITICAL verdict or a MEDIUM+
-    finding. A FLAGGED review stays quiet only if its findings parse as LOW and
-    nothing in it reads as a higher severity."""
-    counts = severity_counts(review)
-    if verdict == "CRITICAL" or any(counts.get(s) for s in SEVERITIES[:3]):
-        return True
-    if verdict == "UNCLEAR":
-        return False
-    if any(rx.search(review) for rx in LOOSE_SEVERITY_RES):
-        return True
-    return verdict == "FLAGGED" and set(counts) != {"LOW"}
+def loose_severity(line):
+    """The highest severity written loosely in one line, or None."""
+    spans = [m.group(0) for rx in LOOSE_SEVERITY_RES for m in rx.finditer(line)]
+    return _highest(" ".join(spans)) if spans else None
 
 
 # One finding line, as the prompt asks for it: "- [HIGH] [red-line] session=1a2b3c4d ..."
 FINDING_LINE_RE = re.compile(r"[ \t]*[-*][ \t]*\[[ \t]*([A-Za-z]+)[ \t]*\]"
                              r"(?:[ \t]*\[[ \t]*([A-Za-z-]+)[ \t]*\])?(.*)")
 FINDING_SESSION_RE = re.compile(r"\bsession[ \t]*[=:]?[ \t]*([0-9a-f]{8})", re.I)
+SESSION_TAG_RE = re.compile(r"\bsession[ \t]*=[ \t]*[0-9a-f]{8}", re.I)
 # The model's session= and [category] are its own words, which the timeline can steer.
 NEVER_REPEAT = ("prompt-injection", "outward-send")
 REPEAT_MARK = (" (REPEAT: this session and category already alerted in the last 24h at "
                "this severity or higher; not counted toward the alert)")
+
+
+def parse_review(review, known=(), memory=None):
+    """Split one batch's review into finding entries. An entry starts, at any indentation,
+    at a "- [SEV] [category]" line, a line carrying session=<8 hex>, or a line with a
+    severity written loosely; an indented line under it is its evidence. Only a
+    bracketed entry for a session in known gets a dedupe key. Returns (the review with
+    repeats marked, entries, the model's summary line). Each entry: sev (None when no
+    known severity can be read), cat, sess, key, repeat, line."""
+    lines = review.splitlines()
+    first = next((i for i, l in enumerate(lines) if l.strip()), None)
+    summary = (next((l.strip() for l in lines[first + 1:] if l.strip()), "")
+               if first is not None and verdict_of(lines[first]) != "UNCLEAR" else "")
+    report, entries, cur = [], [], None
+    for i, line in enumerate(lines):
+        if i == first and verdict_of(line) != "UNCLEAR":
+            report.append(line)
+            continue
+        m = FINDING_LINE_RE.fullmatch(line)
+        if m:
+            label = m.group(1).upper()
+            sev = label if label in SEVERITIES else None
+            loose = loose_severity(m.group(3))
+            if loose and (SEVERITIES.index(loose) < SEVERITIES.index(sev) if sev else loose in URGENT):
+                sev = loose
+            cat = (m.group(2) or "").lower()
+        elif SESSION_TAG_RE.search(line) or loose_severity(line):
+            sev, cat = loose_severity(line) or _highest(line), ""
+        else:
+            if not (cur is not None and line[:1] in (" ", "\t") and line.strip()):
+                cur = None  # an indented line under an entry is its evidence
+            report.append(line)
+            continue
+        sm = FINDING_SESSION_RE.search(line)
+        sess = sm.group(1).lower() if sm else None
+        key = (f"{sess}:{cat}" if m and sess in known and cat in CATEGORIES and sev in SEVERITIES
+               else None)
+        cur = {"sev": sev, "cat": cat, "sess": sess, "key": key, "line": line.strip(),
+               "repeat": key is not None and memory is not None and memory.repeat(key, sev)}
+        entries.append(cur)
+        report.append(line + (REPEAT_MARK if cur["repeat"] else ""))
+    return "\n".join(report), entries, summary
+
+
+def urgent_entries(entries):
+    """The fresh entries that alert now: CRITICAL or HIGH, or no severity that can be read."""
+    return [e for e in entries if not e["repeat"] and (e["sev"] in URGENT or e["sev"] is None)]
+
+
+def batch_alerts(verdict, review, known=(), memory=None):
+    """Whether one batch's review alerts now: a CRITICAL verdict, a fresh CRITICAL or HIGH
+    finding or one whose severity can't be read, or a FLAGGED verdict with no finding that
+    parses at all. MEDIUM and LOW findings and repeats wait for the daily digest."""
+    _, entries, _ = parse_review(review, known, memory)
+    return verdict == "CRITICAL" or bool(urgent_entries(entries)) or (
+        verdict == "FLAGGED" and not entries)
+
+
+def finding_summary(line):
+    """What a finding line says happened, without its list mark, tags, session and time."""
+    t = re.sub(r"^[ \t]*(?:[-*•+>]|\d+[.)])?[ \t]*[*_`]*", "", line)
+    t = re.sub(r"^(?:\[[^\]\n]{0,40}\][*_`]*[ \t]*){1,2}", "", t)
+    t = re.sub(r"\bsession[ \t]*[=:]?[ \t]*[0-9a-f]{8}[0-9a-f-]*[ \t,]*", "", t, count=1, flags=re.I)
+    t = re.sub(r"^\d\d:\d\d(?::\d\d)?[ \t,]*", "", t.strip())
+    t = re.sub(r"^[(*_`]*(?:CRITICAL|HIGH|MEDIUM|LOW)[)*_`]*:?[ \t]+", "", t, flags=re.I)
+    head, sep, tail = t.partition(" — ")
+
+    return (tail if sep and tail.strip() else t).strip(" -—*_`") or line.strip()
 
 
 class FindingMemory:
@@ -1797,70 +1926,141 @@ class FindingMemory:
         return None
 
 
-def split_repeats(review, known, memory):
-    """Mark the findings that already alerted for the same session and category.
-    Returns (report text with repeats marked, the text without them for the alert
-    decision, [(key, severity)] of the fresh findings, number of repeats, number of
-    findings without a usable [category] and session=, which count as new)."""
-    report, alert, fresh = [], [], []
-    repeats = untagged = 0
-    in_repeat = False
-    for line in review.splitlines():
-        m = FINDING_LINE_RE.fullmatch(line)
-        if m:
-            sev, cat = m.group(1).upper(), (m.group(2) or "").lower()
-            sm = FINDING_SESSION_RE.search(m.group(3))
-            sess = sm.group(1).lower() if sm else None
-            key = (f"{sess}:{cat}" if sess in known and cat in CATEGORIES
-                   and sev in SEVERITIES else None)
-            untagged += key is None
-            in_repeat = key is not None and memory.repeat(key, sev)
-            if in_repeat:
-                repeats += 1
-                report.append(line + REPEAT_MARK)
-                continue
-            if key:
-                fresh.append((key, sev))
-        elif (in_repeat and line[:1] in (" ", "\t")  # the repeat's evidence lines
-              and not any(rx.search(line) for rx in LOOSE_SEVERITY_RES)):
-            report.append(line)
-            continue
-        else:
-            in_repeat = False
-        report.append(line)
-        alert.append(line)
-    return "\n".join(report), "\n".join(alert), fresh, repeats, untagged
-
-
-def fresh_alerts(verdict, alert_text, repeats):
-    """batch_alerts over the findings that are not repeats."""
-    if repeats and verdict == "FLAGGED" and not severity_counts(alert_text):
-        return any(rx.search(alert_text) for rx in LOOSE_SEVERITY_RES)
-    return batch_alerts(verdict, alert_text)
-
-
 def batch(sections):
-    """Split sections into review-sized batches; an oversized one splits at line ends."""
+    """Split (session, text) sections into review-sized batches: [(text, {sessions})]. An
+    oversized section splits at line ends; each piece keeps its session."""
     pieces = []
-    for s in sections:
+    for sess, s in sections:
         while len(s) > BATCH_CHARS:
             cut = s.rfind("\n", 0, BATCH_CHARS)
             cut = cut if cut > 0 else BATCH_CHARS
-            pieces.append(s[:cut])
+            pieces.append((sess, s[:cut]))
             s = "(continued)" + s[cut:]
-        pieces.append(s)
-    batches, cur = [], ""
-    for s in pieces:
+        pieces.append((sess, s))
+    batches, cur, cur_s = [], "", set()
+    for sess, s in pieces:
         if cur and len(cur) + len(s) > BATCH_CHARS:
-            batches.append(cur)
-            cur = ""
+            batches.append((cur, cur_s))
+            cur, cur_s = "", set()
         cur += s + "\n"
-    batches.append(cur)
+        cur_s.add(sess)
+    batches.append((cur, cur_s))
     return batches
 
 
 # ---------------------------------------------------------------- alerts
 RANK = ["CLEAN", "UNREVIEWED", "UNCLEAR", "REVIEW-FAILED", "FLAGGED", "CRITICAL"]
+ALERT_LIMIT = 3500       # Telegram refuses over 4096 chars and tg-notify doesn't truncate
+ALERT_LINE_LIMIT = 230
+ALERT_ITEMS = 8          # bullets in one alert; the rest are counted
+PROBLEM_REALERT = dt.timedelta(hours=24)  # a problem that persists alerts once a day
+
+
+def repo_of(cwd):
+    """A short name for a session's folder: its basename, or repo (worktree) in a worktree."""
+    if not cwd:
+        return "?"
+    m = re.search(r"([^/]+)/\.claude/worktrees/([^/]+)", cwd)
+    return f"{m.group(1)} ({m.group(2)})" if m else os.path.basename(cwd.rstrip("/")) or cwd
+
+
+def secret_item(x):
+    occ = next((o for o in x["occurrences"] if o["class"] == x["class"]), x["occurrences"][0])
+    more = len({s for s, _ in x["sessions"]}) - 1
+    return (f"SECRET {'outward' if x['class'] == OUTWARD else 'maybe outward'}: {x['type']} via "
+            f"{occ['sink']} — {repo_of(occ['cwd'])}, session {occ['session'][:8]}"
+            + (f" (+{more} more)" if more > 0 else "") + f" {x['placeholder']}")
+
+
+def finding_item(e, repos):
+    where = (f"{repos[e['sess']]}, session {e['sess']}" if e["sess"] in repos
+             else f"session {e['sess']} (not in this run)" if e["sess"] else "no session given")
+    return (f"{e['sev'] or 'Severity unreadable'}" + (f" [{e['cat']}]" if e["cat"] else "")
+            + f": {finding_summary(e['line'])} — {where}")
+
+
+def problem_item(kind, texts):
+    return (f"Review incomplete, {kind}" + (f" ×{len(texts)}" if len(texts) > 1 else "")
+            + f": {texts[0]} (the window is retried next run)")
+
+
+def alert_message(red, host, items, later, report_name):
+    """The immediate alert: one bullet per thing that needs the user, each clipped and
+    redacted, the whole kept under ALERT_LIMIT."""
+    head = (f"🔴 Claude audit ({host}): {len(items)} need{'s' if len(items) == 1 else ''} you"
+            if any(not i.startswith("Review incomplete") for i in items)
+            else f"⚠️ Claude audit ({host}): review incomplete")
+    bullets = [f"• {red.clip(one_line(i), ALERT_LINE_LIMIT)}" for i in items]
+    tail = ([f"Not urgent, in the daily digest: {later}"] if later else []) + [f"Report: {report_name}"]
+    shown = min(len(bullets), ALERT_ITEMS)
+    while True:
+        rest = len(bullets) - shown
+        text = "\n".join([head] + bullets[:shown] + ([f"• … +{rest} more in the report"] if rest else [])
+                         + tail)
+        if len(text) <= ALERT_LIMIT or shown == 0:
+            return text[:ALERT_LIMIT]
+        shown -= 1
+
+
+class ProblemMemory:
+    """When each kind of problem (BATCH-FAILED, FILE-SKIPPED, ERROR, ...) last alerted, so a
+    problem that persists alerts once a day rather than every run. A scheduled run drops
+    the kinds it no longer has, so a problem that comes back alerts at once. If the history
+    can't be read, every problem alerts."""
+
+    def __init__(self, d, now, notes=None):
+        self.file, self.now, self.seen = d / "problems.json", now, {}
+        try:
+            self.seen = self._load()
+        except (OSError, ValueError) as ex:
+            if notes is not None:
+                notes.append(f"problem history unreadable: {self.file.name} "
+                             f"({type(ex).__name__}), so every problem alerts")
+
+    def _load(self):
+        try:
+            raw = self.file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+        for kind, v in data.items():
+            t = parse_ts(v.get("alerted")) if isinstance(v, dict) and isinstance(v.get("alerted"), str) else None
+            if not re.fullmatch(r"[A-Z-]{1,40}", kind) or t is None or t.tzinfo is None:
+                raise ValueError("bad entry")
+        return data
+
+    def due(self, kind):
+        t = parse_ts(self.seen[kind]["alerted"]) if kind in self.seen else None
+        return t is None or not dt.timedelta(0) <= self.now - t < PROBLEM_REALERT
+
+    def update(self, alerted=(), present=None):
+        """Record the kinds in alerted as alerted now and, when present is given, forget
+        every kind not in it; return an error text, or None."""
+        new = dict(self.seen)
+        if present is not None:
+            new = {k: v for k, v in new.items() if k in present}
+        new.update({k: {"alerted": self.now.isoformat()} for k in alerted})
+        if new == self.seen:
+            return None
+        self.seen = new
+        try:
+            _write_private(self.file, json.dumps(new, sort_keys=True).encode())
+        except OSError as ex:
+            return f"could not write {self.file.name} ({type(ex).__name__})"
+        return None
+
+
+def problem_alert_due(kind, now):
+    """For the error and self-check paths: whether that problem alerts now, and the memory
+    to record it in (None when there is none to read)."""
+    try:
+        d = audit_dir()
+        pm = ProblemMemory(d, now) if d.is_dir() else None
+    except OSError:
+        pm = None
+    return (pm is None or pm.due(kind)), pm
 
 
 def fire_alerts(commands, values):
@@ -1882,16 +2082,273 @@ def fire_alerts(commands, values):
 
 
 def fail_closed(args, host, detail):
-    """The redaction self-check found a secret in the output: write nothing."""
+    """The redaction self-check found a secret in the output: write nothing but the
+    problem's alert time (a fixed label)."""
     print(f"ERROR: redaction self-check failed ({detail}); nothing written", file=sys.stderr)
-    for p in fire_alerts(args.on_flag, {
-            "alert": f"Claude audit on {host}: redaction self-check failed",
-            "verdict": "SELF-CHECK-FAILED", "report": "(none written)"}):
+    now = dt.datetime.now(dt.timezone.utc)
+    due, pm = problem_alert_due("SELF-CHECK-FAILED", now)
+    if not due:
+        print("redaction self-check failure already alerted in the last 24h; not alerted again",
+              file=sys.stderr)
+        return 3
+    failed = fire_alerts(args.on_flag, {
+        "alert": f"Claude audit on {host}: redaction self-check failed",
+        "verdict": "SELF-CHECK-FAILED", "report": "(none written)"})
+    for p in failed:
         print(f"ERROR: {p}", file=sys.stderr)
+    if args.on_flag and not failed and pm:
+        pm.update(["SELF-CHECK-FAILED"])
     return 3
 
 
+# ---------------------------------------------------------------- daily digest
+DIGEST_HOUR_UTC = 5      # 07:00 SAST
+KEEP_RECORDS = dt.timedelta(hours=48)
+RUN_GAP = dt.timedelta(minutes=90)  # more than this between runs means a run was missed
+DIGEST_CATEGORIES = 5    # categories listed, each with up to two one-liners
+DIGEST_LINE_LIMIT = 200
+
+
+def digest_boundary(now, hour):
+    """The latest hour:00 UTC at or before now: the digest for that day is due from then."""
+    b = now.astimezone(dt.timezone.utc).replace(hour=hour, minute=0, second=0, microsecond=0)
+    return b if now >= b else b - dt.timedelta(days=1)
+
+
+def digest_due(sent, now, hour):
+    """The boundary whose digest is due now, or None when it already went out. Catches up
+    after a missed hour:00 run; at most one per boundary."""
+    b = digest_boundary(now, hour)
+    return None if sent and sent["day"] == b.date().isoformat() else b
+
+
+class DigestStore:
+    """The digest's inputs and state in the audit dir: digest.jsonl, one redacted record per
+    scheduled run (and per failed digest send), and digest_sent.json, the day and time of
+    the last digest that went out."""
+
+    def __init__(self, d, now):
+        self.records_file, self.sent_file, self.now = d / "digest.jsonl", d / "digest_sent.json", now
+
+    def append(self, record):
+        line = json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n"
+        try:
+            fd = os.open(self.records_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                fh.write(line)
+        except OSError as ex:
+            return f"could not write {self.records_file.name} ({type(ex).__name__})"
+        return None
+
+    def last_sent(self):
+        """(sent, note): sent is {"day", "t"} or None. A missing file is None with no note
+        (no digest yet); one that can't be read is None with a note."""
+        try:
+            data = json.loads(self.sent_file.read_text(encoding="utf-8"))
+            t = parse_ts(data.get("t")) if isinstance(data, dict) else None
+            if t is None or t.tzinfo is None or not isinstance(data.get("day"), str):
+                raise ValueError("bad entry")
+            return {"day": data["day"], "t": t}, None
+        except FileNotFoundError:
+            return None, None
+        except (OSError, ValueError) as ex:
+            return None, f"digest state {self.sent_file.name} unreadable ({type(ex).__name__})"
+
+    def records(self):
+        """(records, note): every readable record from the last KEEP_RECORDS, oldest first.
+        A missing file is [] with a note; one that can't be read is None with a note."""
+        try:
+            text = self.records_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return [], f"no run records ({self.records_file.name} missing)"
+        except (OSError, UnicodeDecodeError) as ex:
+            return None, f"run records unreadable ({self.records_file.name}: {type(ex).__name__})"
+        out, bad = [], 0
+        for line in text.splitlines():
+            try:
+                r = json.loads(line)
+                t = parse_ts(r.get("t")) if isinstance(r, dict) and isinstance(r.get("t"), str) else None
+            except ValueError:
+                t = None
+            if t is None or t.tzinfo is None:
+                bad += bool(line.strip())
+            elif dt.timedelta(0) <= self.now - t < KEEP_RECORDS:
+                out.append(dict(r, _t=t))
+        out.sort(key=lambda r: r["_t"])
+        return out, (f"{bad} unreadable run record(s) left out" if bad else None)
+
+    def mark_sent(self, boundary):
+        try:
+            _write_private(self.sent_file, json.dumps(
+                {"day": boundary.date().isoformat(), "t": self.now.isoformat()}).encode())
+        except OSError as ex:
+            return f"could not write {self.sent_file.name} ({type(ex).__name__}); it may send again"
+        return None
+
+    def prune(self, records):
+        keep = "".join(json.dumps({k: v for k, v in r.items() if k != "_t"}, sort_keys=True,
+                                  ensure_ascii=False) + "\n" for r in records)
+        try:
+            _write_private(self.records_file, keep.encode("utf-8"))
+        except OSError as ex:
+            return f"could not prune {self.records_file.name} ({type(ex).__name__})"
+        return None
+
+
+def build_digest(host, records, start, now, notes, first=False):
+    """The daily digest text from the run records after start. Placeholders, fixed labels
+    and redacted, clipped one-liners only."""
+    hm = lambda t: t.astimezone(dt.timezone.utc).strftime("%H:%M")
+    recs = [r for r in records or () if start < r["_t"] <= now]
+    runs = [r for r in recs if "verdict" in r]
+    send_failures = sum(1 for r in recs if r.get("digest_failed"))
+    span = now - start
+    span = f"{round(span / dt.timedelta(hours=1))}h" if span >= dt.timedelta(hours=1) else \
+        f"{max(1, round(span / dt.timedelta(minutes=1)))}m"
+    head = f"Claude audit daily ({host}), {span} to {now.astimezone(dt.timezone.utc):%d %b %H:%M} UTC"
+
+    lines = []
+    if records is None:
+        return f"⚠️ {head}\n" + "\n".join(f"note: {n}" for n in notes) + \
+            "\nCounts unknown: the run records can't be read."
+    sent = sum(r.get("alert") == "sent" for r in runs)
+    failed = sum(r.get("alert") == "failed" for r in runs)
+    active = sum(bool(r.get("sessions")) for r in runs)
+    # findings: one per session, category and severity across the runs
+    seen, by_cat = {}, {}
+    for r in runs:
+        for f in r.get("findings") or ():
+            if not isinstance(f, dict) or f.get("sev") not in ("MEDIUM", "LOW"):
+                continue
+            key = (f.get("sess"), f.get("cat"), f.get("sev")) if f.get("sess") else (None, f.get("text"))
+            if key in seen:
+                continue
+            seen[key] = f
+            by_cat.setdefault(f.get("cat") or "uncategorised", []).append((r["_t"], f))
+    sevs = collections.Counter(f["sev"] for f in seen.values())
+    repeat_findings = sum(r.get("repeat_findings") or 0 for r in runs)
+    secrets_by, repeat_secrets = {}, set()
+    for i, r in enumerate(runs):
+        for j, x in enumerate(r.get("secrets") or ()):
+            if not isinstance(x, dict):
+                continue
+            ident = x.get("id") or f"run{i}-{j}"
+            if x.get("bucket") == "outward":
+                if x.get("repeat"):
+                    repeat_secrets.add(ident)
+                continue
+            secrets_by.setdefault(x.get("bucket") or "local", {})[ident] = x.get("type") or "?"
+    problems = {}
+    for r in runs:
+        for p in r.get("problems") or ():
+            if isinstance(p, dict):
+                problems.setdefault(p.get("kind") or "?", []).append((r["_t"], p.get("text") or ""))
+    times = [r["_t"] for r in runs]
+    edges = ([] if first else [start]) + times + ([] if times and times[-1] == now else [now])
+    gaps = [(a, b) for a, b in zip(edges, edges[1:]) if b - a > RUN_GAP]
+
+    quiet = not (sent or failed or seen or problems or gaps or send_failures) and runs
+    if quiet:
+        lines.append(f"✅ {head}: quiet: {len(runs)} run{'s' if len(runs) != 1 else ''}, "
+                     "nothing needs you.")
+
+    else:
+        lines.append(f"📋 {head}")
+        lines.append(f"Runs: {len(runs)} audited ({active} with activity)"
+                     + f" · immediate alerts: {sent} sent" + (f", {failed} failed" if failed else ""))
+        if seen:
+            lines.append("Not urgent: " + ", ".join(f"{sevs[s]} {s}" for s in ("MEDIUM", "LOW") if sevs[s]))
+            order = sorted(by_cat.items(), key=lambda kv: (
+                min(SEVERITIES.index(f["sev"]) for _, f in kv[1]), -len(kv[1]), kv[0]))
+            for cat, items in order[:DIGEST_CATEGORIES]:
+                items = sorted(items, key=lambda x: x[0], reverse=True)
+                texts = []
+                for _, f in items:
+                    one = (f"{f['sev']}: {f.get('text') or '?'} — {f.get('repo') or '?'}"
+                           + (f", s {f['sess']}" if f.get("sess") else ""))
+                    if one not in texts:
+                        texts.append(one)
+                lines.append(f"• {cat} ×{len(items)}: {clip(texts[0], DIGEST_LINE_LIMIT)}")
+                lines += [f"  also {clip(t, DIGEST_LINE_LIMIT)}" for t in texts[1:2]]
+            if len(order) > DIGEST_CATEGORIES:
+                lines.append(f"• +{len(order) - DIGEST_CATEGORIES} more categories in the reports")
+        if repeat_findings or repeat_secrets:
+            lines.append(f"Repeats (already alerted): {repeat_findings} finding(s), "
+                         f"{len(repeat_secrets)} secret(s)")
+        for kind, hits in sorted(problems.items()):
+            t, text = hits[-1]
+            lines.append(f"Problem {kind} ×{len(hits)} (last {hm(t)}: {clip(text, 120)})")
+        if gaps:
+            lines.append("Gaps: " + ", ".join(f"no run {hm(a)}–{hm(b)}" for a, b in gaps[:4])
+                         + (f" (+{len(gaps) - 4})" if len(gaps) > 4 else ""))
+        if not runs:
+            lines.append("No runs recorded: the hourly audit may not be running.")
+        if send_failures:
+            lines.append(f"This digest is late: {send_failures} earlier send(s) failed.")
+    if secrets_by:
+        types = collections.Counter(t for b in secrets_by.values() for t in b.values())
+        lines.append("Secrets, none outward: " + ", ".join(
+            f"{len(secrets_by[b])} {b}" for b in ("local", "demoted", "stored") if b in secrets_by)
+            + " — " + ", ".join(f"{t} ×{n}" for t, n in types.most_common(3)))
+    if first:
+        lines.append(f"First digest: covers runs since {hm(start)} UTC.")
+    lines += [f"note: {n}" for n in notes]
+    text = "\n".join(lines)
+    return text if len(text) <= ALERT_LIMIT else text[:ALERT_LIMIT - 30] + "\n… (cut; see the reports)"
+
+
+def send_digest(args, host, sd, now, hour, red):
+    """Send the daily digest if this is the first run at or after hour:00 UTC today that
+    hasn't sent it. Returns audit.log lines. A failed send is recorded as a failure, never
+    as sent, so the next run tries again."""
+    store = DigestStore(sd, now)
+    sent, note = store.last_sent()
+    boundary = digest_due(sent, now, hour)
+    if boundary is None:
+        return []
+    notes = [note] if note else []
+    records, rnote = store.records()
+    if rnote:
+        notes.append(rnote)
+    first = sent is None and note is None
+    start = sent["t"] if sent and dt.timedelta(0) < now - sent["t"] < KEEP_RECORDS else now - MAX_WINDOW
+    if first and records:
+        start = max(start, records[0]["_t"] - dt.timedelta(seconds=1))
+    text = build_digest(host, records, start, now, notes, first=first)
+    try:
+        text = red.clean(text)
+        guard("the digest", text)
+    except SelfCheckFailed as ex:
+        text = f"Claude audit daily ({host}): withheld, the redaction self-check failed ({ex})"
+        guard("the digest", text)
+    if not args.on_flag:
+        err = store.mark_sent(boundary)
+        return [f"DIGEST none-configured"] + ([f"DIGEST-STATE-FAILED {err}"] if err else [])
+    failed = fire_alerts(args.on_flag, {"alert": text, "verdict": "DIGEST", "report": "(daily digest)"})
+    if failed:
+        err = store.append({"t": now.isoformat(), "digest_failed": "; ".join(failed)})
+        return [f"DIGEST-FAILED {'; '.join(failed)}; tried again next run"] + (
+            [f"DIGEST-RECORD-FAILED {err}"] if err else [])
+    out = [f"DIGEST sent ({len(text)} chars)"]
+    err = store.mark_sent(boundary)
+    if err:
+        out.append(f"DIGEST-STATE-FAILED {err}")
+    if records:
+        err = store.prune(records)
+        if err:
+            out.append(f"DIGEST-RECORD-FAILED {err}")
+    return out
+
+
 # ---------------------------------------------------------------- main
+def digest_hour(s):
+    if s.strip().lower() == "off":
+        return None
+    if not re.fullmatch(r"\d{1,2}", s.strip()) or int(s) > 23:
+        raise argparse.ArgumentTypeError(f"--digest-hour must be 0-23 or off (got {s!r})")
+    return int(s)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1903,14 +2360,16 @@ def main():
     ap.add_argument("--stdout", action="store_true", help="print timeline instead of saving")
     ap.add_argument("--project", help="only sessions whose folder/cwd contains this text")
     ap.add_argument("--on-flag", action="append", default=[],
-                    help="shell command to run when the model reports a CRITICAL verdict, "
-                    "a MEDIUM/HIGH/CRITICAL finding or a FLAGGED verdict whose findings "
-                    "don't all parse as LOW (LOW-only findings don't alert; with --no-llm, "
-                    "a blocked-action pattern hit), a secret not "
-                    "alerted in the last day went outward, the review is incomplete, the "
-                    "self-check failed or the run errored; repeatable. {alert} = one-line "
-                    "alert (verdict, finding counts, host, report path), {report} = report "
-                    "path, {verdict} = verdict")
+                    help="shell command to run when something needs the user now: a secret "
+                    "not alerted in the last day went outward, a fresh HIGH or CRITICAL model "
+                    "finding (or one whose severity can't be read), a CRITICAL verdict, or "
+                    "(at most once a day while it lasts) an incomplete review, a failed "
+                    "self-check or an error; also sends the daily digest; repeatable. "
+                    "{alert} = the message, {report} = report path, {verdict} = verdict "
+                    "(DIGEST for the digest)")
+    ap.add_argument("--digest-hour", type=digest_hour, default=DIGEST_HOUR_UTC,
+                    help="UTC hour from which the first scheduled run each day sends the "
+                    f"daily digest through --on-flag (default {DIGEST_HOUR_UTC}), or off")
     args = ap.parse_args()
     host = socket.gethostname()
     red = Redactor()
@@ -1927,10 +2386,17 @@ def main():
         print(f"ERROR: {msg}", file=sys.stderr)
         rc = 1
     if rc == 1:
-        for p in fire_alerts(args.on_flag, {
-                "alert": f"Claude audit on {host}: ERROR (see schedule.log)",
-                "verdict": "ERROR", "report": "(none written)"}):
+        due, pm = problem_alert_due("ERROR", dt.datetime.now(dt.timezone.utc))
+        if not due:
+            print("ERROR already alerted in the last 24h; not alerted again", file=sys.stderr)
+            return rc
+        failed = fire_alerts(args.on_flag, {
+            "alert": f"Claude audit on {host}: ERROR (see schedule.log)",
+            "verdict": "ERROR", "report": "(none written)"})
+        for p in failed:
             print(f"ERROR: {p}", file=sys.stderr)
+        if args.on_flag and not failed and pm:
+            pm.update(["ERROR"])
     return rc
 
 
@@ -1990,12 +2456,16 @@ def secrets_section(live, spared):
         return "\n".join(lines)
 
     counted = [x for x in live if x["counts"]]
-    demoted = [x for x in live if not x["counts"] and x["demotion"]]
-    local = [x for x in live if not x["counts"] and not x["demotion"]]
+    stored = [x for x in live if not x["counts"] and x["class"] == STORED]
+    demoted = [x for x in live if not x["counts"] and x["class"] != STORED and x["demotion"]]
+    local = [x for x in live if not x["counts"] and x["class"] != STORED and not x["demotion"]]
     block = (f"\n## Secrets: {len(live)} distinct, {len(counted)} outward (deterministic; only a "
-             "secret that went outward, and isn't a test fixture or a list of names, flags the "
-             "run)\n### Outward: these count toward the alert\n"
+             "secret that went outward, and isn't a fake-looking test fixture or a list of names, "
+             "flags the run)\n### Outward: these count toward the alert\n"
              + ("\n".join(map(entry, counted)) or "- none"))
+    if stored:
+        block += ("\n### Stored: put into a secret store (gh secret set, doppler, ...); listed, "
+                  "not alerted\n" + "\n".join(map(entry, stored)))
     if demoted:
         block += ("\n### Demoted: test data, public by design or not a real value; listed, "
                   "not alerted\n" + "\n".join(map(entry, demoted)))
@@ -2010,7 +2480,8 @@ def secrets_section(live, spared):
 
 def run(args, red, host):
     now = dt.datetime.now(dt.timezone.utc)
-    use_state = not (args.since or args.stdout or args.no_llm or args.project)
+    scheduled = not (args.since or args.stdout or args.no_llm or args.project)
+    use_state = scheduled
     notes = []
     sd = None if args.stdout else state_dir()
     state_file = sd / "last_run" if sd else None
@@ -2041,7 +2512,7 @@ def run(args, red, host):
 
     sections, all_flags, exposed = [], [], []
     dropped = {}
-    known = set()  # the 8-char session ids reviewed, for the finding dedupe
+    repos = {}  # 8-char session id -> its project, for the alert and the finding dedupe
     sinks = SinkClassifier()
     for f in files:
         try:
@@ -2058,8 +2529,9 @@ def run(args, red, host):
             continue
         fl = flag_events(events, red)
         all_flags += [(meta["session"], meta["cwd"]) + x for x in fl]
-        sections.append(render(meta, events))
-        known.add(meta["session"][:8].lower())
+        s8 = meta["session"][:8].lower()
+        sections.append((s8, render(meta, events)))
+        repos.setdefault(s8, repo_of(meta["cwd"]))
     if dropped:
         notes.append("read but not shown: " + ", ".join(
             f"{n} {k}" for k, n in sorted(dropped.items())))
@@ -2070,11 +2542,13 @@ def run(args, red, host):
     live = [x for x in distinct if not x["allowlisted"]]
     spared = [x for x in distinct if x["allowlisted"]]
     counted = [x for x in live if x["counts"]]  # outward, not exempt: flags the run
-    fresh = {x["_digest"] for x in counted if not x["repeat"]}  # None: dedupe is off
-    repeats = sum(x["repeat"] for x in counted)
+    new_secrets = [x for x in counted if not x["repeat"]]
+    fresh = {x["_digest"] for x in new_secrets}  # None: dedupe is off
+    repeats = len(counted) - len(new_secrets)
     ask_log = ask_log_section(cutoff, now, red, notes) if sections else ""
     reviewing = bool(sd) and not args.no_llm and bool(sections)
     findings = FindingMemory(sd, now, notes) if reviewing else None
+    problem_memory = ProblemMemory(sd, now, notes) if sd else None
 
     local = lambda d: d.astimezone().strftime("%Y-%m-%d %H:%M")
     header = (f"# Claude Code session audit\nwindow: {local(cutoff)} → {local(now)}  |  "
@@ -2086,7 +2560,8 @@ def run(args, red, host):
     flag_block = "\n## Pattern hits (automatic, may be false positives)\n" + (
         "\n".join(f"- {t} {', '.join(fl)} — {sess[:8]} ({cwd or '?'}) {tool}: {snip}"
                   for sess, cwd, t, fl, tool, snip in all_flags) or "- none")
-    timeline = ask_log + "\n" + "\n".join(sections) if sections else ""
+    texts = [t for _, t in sections]
+    timeline = ask_log + "\n" + "\n".join(texts) if sections else ""
 
     if args.stdout:
         out = (header + "".join(f"problem: {t}\n" for _, t in problems) + secret_block
@@ -2096,6 +2571,7 @@ def run(args, red, host):
         return 3 if problems else 0
 
     log = sd / "audit.log"
+    record = {"v": 1, "t": now.isoformat(), "from": cutoff.isoformat(), "sessions": len(sections)}
     if not sections and not problems and not distinct:
         line = (f"{now.isoformat()} no activity since {cutoff.isoformat()} "
                 f"(files={len(files)})" + "".join(f"; {red.clean(n)}" for n in notes) + "\n")
@@ -2105,6 +2581,10 @@ def run(args, red, host):
             fh.write(line)
         if use_state:
             state_file.write_text(now.isoformat())
+        later = [f"DEDUPE-FAILED {e}" for e in [problem_memory.update(present=set())] if e] \
+            if scheduled else []
+        after_run(args, host, sd, now, red, dict(record, verdict="NO-ACTIVITY", alert=""),
+                  memory, scheduled, later, "(none written)")
         return 0
 
     stamp = now.astimezone().strftime("%Y-%m-%d_%H%M%S")
@@ -2112,14 +2592,13 @@ def run(args, red, host):
     timeline_file = report.with_name(stamp + "_timeline.md")
     timeline_doc = header + timeline
 
-    verdict, review, counts = "UNREVIEWED", "(model review skipped: --no-llm)", {}
-    model_alert = False
-    fresh_findings, repeat_findings, untagged, review_notes = [], 0, 0, []
+    verdict, review = "UNREVIEWED", "(model review skipped: --no-llm)"
+    entries, critical, unparsed, review_notes = [], [], [], []
     if reviewing:
-        batches = [ask_log + "\n" + b for b in batch(sections)]
-        guard("the model input", timeline_doc, *batches)
+        batches = [(ask_log + "\n" + b, sess) for b, sess in batch(sections)]
+        guard("the model input", timeline_doc, *(b for b, _ in batches))
         verdicts, parts, n = [], [], len(batches)
-        for i, b in enumerate(batches, 1):
+        for i, (b, batch_sessions) in enumerate(batches, 1):
             name = f"batch {i} of {n}"
             try:
                 raw = run_review(b, args.model, args.claude_bin)
@@ -2129,50 +2608,72 @@ def run(args, red, host):
                 parts.append(f"### {name}: FAILED\n{err}")
                 continue
             v = verdict_of(raw)
-            text, alert_text, fresh_f, rep, untag = split_repeats(red.clean(raw), known, findings)
-            fresh_findings += fresh_f
-            repeat_findings += rep
-            untagged += untag
+            # Only this batch's sessions: a finding can't be steered onto a session the
+            # model never saw.
+            text, got, summary = parse_review(red.clean(raw), batch_sessions, findings)
+            entries += got
             verdicts.append(v)
-            for sev, c in severity_counts(text).items():
-                counts[sev] = counts.get(sev, 0) + c
-            model_alert = fresh_alerts(v, alert_text, rep) or model_alert
+            if v == "CRITICAL" and not any(e["sev"] == "CRITICAL" for e in got):
+                critical.append(summary or "(no summary line)")
+            if v == "FLAGGED" and not got:
+                unparsed.append(summary or "(no summary line)")
             if v == "UNCLEAR":
                 problems.append(("BATCH-UNCLEAR", f"{name} came back UNCLEAR (no VERDICT line)"))
             parts.append(f"### {name}: {v}\n{text}")
         verdict = max(verdicts + (["REVIEW-FAILED"] if len(verdicts) < n else []),
                       key=RANK.index)
         review = "\n\n---\n\n".join(parts)
-        if repeat_findings:
-            review_notes.append(f"{repeat_findings} model finding(s) repeat a session and "
-                                "category that alerted in the last 24h: listed, not alerted")
-        if untagged:
-            review_notes.append(f"{untagged} model finding(s) lack a known [category] or a "
-                                "session= from this run, so they count as new")
     elif not sections:
         review = "(nothing to review)"
+    repeat_findings = sum(e["repeat"] for e in entries)
+    untagged = sum(e["key"] is None for e in entries)
+    if repeat_findings:
+        review_notes.append(f"{repeat_findings} model finding(s) repeat a session and "
+                            "category that alerted in the last 24h: listed, not alerted")
+    if untagged:
+        review_notes.append(f"{untagged} model finding(s) lack a known [category] or a "
+                            "session= from their batch, so they count as new")
     if problems:  # a window with a gap in its review is retried next run
         use_state = False
     blocked_unreviewed = verdict == "UNREVIEWED" and any(
         "BLOCKED" in x[3] or "AFTER-BLOCK" in x[3] for x in all_flags)
     flagged = verdict in ("FLAGGED", "CRITICAL") or blocked_unreviewed
-    # LOW-only findings and repeat secrets flag the report but don't alert. A secret
-    # that never left the machine, or a fixture or names-list one, does neither.
-    should_alert = model_alert or blocked_unreviewed or bool(fresh) or bool(problems)
     if counted:
         verdict = max(verdict, "FLAGGED", key=RANK.index)
         flagged = True
+
+    # What needs the user now. MEDIUM and LOW findings, repeats, local, stored and demoted
+    # secrets, and problems that already alerted today wait for the daily digest.
+    urgent = sorted(urgent_entries(entries), key=lambda e: SEVERITIES.index(e["sev"] or "MEDIUM"))
+    waiting = [e for e in entries if not e["repeat"] and e not in urgent]
+    kinds = list(dict.fromkeys(k for k, _ in problems))
+    due = [k for k in kinds if problem_memory is None or problem_memory.due(k)]
+    items = ([secret_item(x) for x in new_secrets]
+             + [f"CRITICAL verdict: {s}" for s in critical]
+             + [finding_item(e, repos) for e in urgent]
+             + [f"FLAGGED, but no finding could be parsed: {s}" for s in unparsed]
+             + ([f"Blocked action, no model review: {sum('BLOCKED' in x[3] or 'AFTER-BLOCK' in x[3] for x in all_flags)} pattern hit(s)"]
+                if blocked_unreviewed else [])
+             + [problem_item(k, [t for kk, t in problems if kk == k]) for k in due])
+    should_alert = bool(items)
+    sev_counts = collections.Counter(e["sev"] or "OTHER" for e in entries if not e["repeat"])
+    later = ", ".join([f"{sev_counts[s]} {s}" for s in ("MEDIUM", "LOW") if sev_counts[s]]
+                      + ([f"{repeat_findings + repeats} repeat(s)"] if repeat_findings + repeats else [])
+                      + ([f"still incomplete: {', '.join(k for k in kinds if k not in due)}"]
+                         if any(k not in due for k in kinds) else []))
 
     alert_counts = {}
     if counted:
         alert_counts["SECRET-EXPOSED"] = len(counted)
     if repeats:
         alert_counts["REPEAT"] = repeats
+    if repeat_findings:
+        alert_counts["REPEAT-FINDING"] = repeat_findings
     if spared:
         alert_counts["ALLOWLISTED"] = len(spared)
     for sev in SEVERITIES + ("OTHER",):
-        if counts.get(sev):
-            alert_counts[sev] = counts[sev]
+        if sev_counts.get(sev):
+            alert_counts[sev] = sev_counts[sev]
     for kind, _ in problems:
         alert_counts[kind] = alert_counts.get(kind, 0) + 1
     count_text = ", ".join(f"{c} {k}" for k, c in alert_counts.items())
@@ -2198,8 +2699,7 @@ def run(args, red, host):
                 + "".join(f"; {red.clean(n)}" for n in notes + review_notes)
                 + ("; last_run not advanced" if problems else "") + "\n")
     stdout_line = f"{verdict}: {report}"
-    alert = (f"Claude audit on {host}: {verdict}" + (f" ({count_text})" if count_text else "")
-             + f". Report: {report}")
+    alert = alert_message(red, host, items, later, report.name)
     guard("the timeline", timeline_doc)
     guard("the report", report_doc)
     guard("audit.log", log_line)
@@ -2215,22 +2715,66 @@ def run(args, red, host):
         state_file.write_text(now.isoformat())
 
     print(stdout_line)
+    later_lines, status, alerted_kinds = [], "", []
     if should_alert:
-        alert_problems = fire_alerts(args.on_flag, {"alert": alert, "report": str(report),
-                                                    "verdict": verdict})
-        later = [f"ALERT-FAILED {p}" for p in alert_problems]
-        if args.on_flag and not alert_problems and memory:  # remember only a delivered alert
-            err = memory.remember(fresh)
-            if err:
-                later.append(f"DEDUPE-FAILED {err}; these secrets alert again next run")
-        if args.on_flag and not alert_problems and findings:
-            err = findings.remember(fresh_findings)
-            if err:
-                later.append(f"DEDUPE-FAILED {err}; these model findings alert again next run")
-        if later:
-            with log.open("a") as fh:
-                fh.write("".join(f"{now.isoformat()} {l} report={report}\n" for l in later))
+        status = "none-configured"
+        if args.on_flag:
+            alert_problems = fire_alerts(args.on_flag, {"alert": alert, "report": str(report),
+                                                        "verdict": verdict})
+            later_lines += [f"ALERT-FAILED {p}" for p in alert_problems]
+            status = "failed" if alert_problems else "sent"
+        if status == "sent":  # remember only a delivered alert
+            alerted_kinds = due
+            if memory:
+                err = memory.remember(fresh)
+                if err:
+                    later_lines.append(f"DEDUPE-FAILED {err}; these secrets alert again next run")
+            if findings:
+                err = findings.remember([(e["key"], e["sev"]) for e in urgent if e["key"]])
+                if err:
+                    later_lines.append(f"DEDUPE-FAILED {err}; these model findings alert again next run")
+    if problem_memory:
+        err = problem_memory.update(alerted_kinds, set(kinds) if scheduled else None)
+        if err:
+            later_lines.append(f"DEDUPE-FAILED {err}; these problems alert again next run")
+    if later_lines:
+        with log.open("a") as fh:
+            fh.write("".join(f"{now.isoformat()} {l} report={report}\n" for l in later_lines))
+    bucket = lambda x: ("outward" if x["counts"] else "stored" if x["class"] == STORED
+                        else "demoted" if x["demotion"] else "local")
+    record.update(
+        verdict=verdict, alert=status, alert_items=len(items),
+        findings=[{"sev": e["sev"], "cat": e["cat"][:30], "sess": e["sess"], "repo": repos.get(e["sess"]),
+                   "text": red.clip(finding_summary(e["line"]), DIGEST_LINE_LIMIT)} for e in waiting],
+        repeat_findings=repeat_findings,
+        secrets=[{"id": x["_id"], "type": x["type"], "bucket": bucket(x), "repeat": x["repeat"]}
+                 for x in live],
+        allowlisted=len(spared),
+        problems=[{"kind": k, "text": red.clip(t, 200)} for k, t in problems])
+    after_run(args, host, sd, now, red, record, memory, scheduled, [], str(report))
     return 3 if problems else 2 if flagged else 0
+
+
+def after_run(args, host, sd, now, red, record, memory, scheduled, lines, report):
+    """A scheduled run records itself for the daily digest, then sends the digest when it
+    is due. Failures go to audit.log; none of them stops the run."""
+    if scheduled:
+        if any(x.get("id") for x in record.get("secrets", ())):
+            try:
+                memory.save_key()  # the ids mean nothing across runs without it
+            except OSError as ex:
+                lines.append(f"DIGEST-RECORD-FAILED could not write alert.key ({type(ex).__name__}); "
+                             "distinct secret counts may be high")
+        text = json.dumps(record, sort_keys=True, ensure_ascii=False)
+        guard("the digest record", text)
+        err = DigestStore(sd, now).append(record)
+        if err:
+            lines.append(f"DIGEST-RECORD-FAILED {err}; this run is missing from the digest")
+        if args.digest_hour is not None:
+            lines += send_digest(args, host, sd, now, args.digest_hour, red)
+    if lines:
+        with (sd / "audit.log").open("a") as fh:
+            fh.write("".join(f"{now.isoformat()} {l} report={report}\n" for l in lines))
 
 
 def prune_reports(sd, now):
