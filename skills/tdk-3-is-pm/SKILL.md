@@ -203,7 +203,8 @@ Send GO only when **all** of these hold:
     prints `0`), and CodeRabbit left no review or comment on the PR (the reviews command above, and
     `gh api 'repos/<owner>/<repo>/issues/<n>/comments?per_page=100' -q '[.[]|select(.user.login=="coderabbitai[bot]")]|length'`
     prints `0`). Any CodeRabbit status, review or comment means it is installed; the rows here apply.
-  - `Review rate limited` in a repo with the review kit — passes only when the worker's line is
+  - `Review rate limited` in a repo with the review kit — passes only when the worker's latest
+    `pre-pr-review:` line (Step 1b's, or its last fix review's) is
     `pre-pr-review: /review — verdict <sha> covers HEAD` naming the head (not `incomplete`,
     `fallback` or `secrets: not_scanned`), you confirm it from the first line of
     `<repo>/.claude/worktrees/<task>/.review/verdict.md` (`# Review verdict — <branch> — <short-sha>
