@@ -65,9 +65,10 @@ only", "don't deploy"), follow it.
 
 Then post the breakdown in chat: numbered tasks, each with scope, repo, dependencies, an expected
 wall-clock time (`~1h`), a short list of what it builds (`export script, bucket, upload`; never a
-line count, since a long prompt edit can be trivial), and an observable definition of done; what runs in parallel versus what is serial; anything you would hold
-back until another task lands; and each repo's deploy — its command, "auto on merge to `main`", or
-"none found" (after checking its docs, CI workflows, and `gh api repos/<owner>/<repo>/deployments`).
+line count), and an observable definition of done; what runs in parallel versus what is serial;
+anything you would hold back until another task lands; and each repo's deploy — its command, "auto
+on merge to `main`", or "none found" (after checking its docs, CI workflows, and
+`gh api repos/<owner>/<repo>/deployments`).
 Where `main` deploys on merge, approving the breakdown approves every merge shipping — so if the
 request says "merge only" or "don't deploy", raise that conflict here, before anything spawns.
 
@@ -89,9 +90,9 @@ than from memory. Never add the worktree or the tmux session yourself.
 - Only parallelise genuinely independent tasks. Two workers in the same file is a merge conflict you
   will have to bounce back.
 
-After the first spawn, create one recurring `CronCreate` job for the whole feature, cron `7 * * * *`,
-prompt: `Run the "Proportion check" section of the tdk-3-is-pm skill for every live worker.` It is
-session-only and fires only while you are idle, which is when a worker can spiral unwatched.
+After the first spawn, if `CronList` shows no such job, create one recurring `CronCreate` job, cron
+`7 * * * *`, prompt: `Run the "Proportion check" section of the tdk-3-is-pm skill.` It is
+session-only, fires only while you are idle, and expires after 7 days. If it fails, say so.
 
 ## Step 3 — The brief
 
@@ -156,15 +157,18 @@ question it never sent, or sitting at a permission prompt only the user can answ
 
 ## Proportion check
 
-The hourly job (Step 2) runs this. For each live worker, read the elapsed time since its last
-`[YYYY-MM-DD HH:MM:SS] <name> started` line in `~/.claude-rc.log`; the quoted ask and `EXPECTED` in
-its brief, `~/.local/state/claude-sessions/<name>.md`; and what it builds: `git -C <repo> diff
---stat origin/main...feat/<task>`, `git -C <worktree> status --short`, and any spec or plan doc.
+The hourly job (Step 2) runs this. For each task worker still working (not reported, not waiting on
+the user), read the elapsed time since its first `[YYYY-MM-DD HH:MM:SS] <name> started` line in
+`~/.claude-rc.log`; the quoted ask and `EXPECTED` in its brief,
+`~/.local/state/claude-sessions/<name>.md` (or a newer time the user set); and what it builds:
+`git -C <repo> diff --stat origin/main...feat/<task>`, `git -C <repo>/.claude/worktrees/<task>
+status --short`, and any spec or plan doc.
 Then ask: (a) is it past its expected time? (b) is it building something the user's words don't
 name? Compare with the quoted ask, not your breakdown: the breakdown can be where the bloat starts.
 (c) would the user look at this and say it isn't what he asked for? Any yes: message him at once
-with the numbers and your recommendation (cut, ship what exists, or continue) and why. All no:
-send nothing. A signal you can't read is not a no: say which one, for which worker.
+with the numbers and your recommendation (cut, ship what exists, or continue) and why; after a
+"continue", only when something is new. All no: add nothing beyond the State line. A signal you
+can't read is not a no: say which one, for which worker.
 
 ## Step 5 — Decide the merge (only you send GO)
 
@@ -322,8 +326,9 @@ git -C <repo> worktree list               # what is checked out where
 git -C <repo> branch -r --merged main     # what already landed
 ```
 
-Plus `ListAgents`. Where anything is still ambiguous, ask the worker directly what state it is in —
-far cheaper than guessing wrong.
+Plus `ListAgents`, and `CronList`: recreate the proportion-check job (Step 2) if it is gone. Where
+anything is still ambiguous, ask the worker directly what state it is in — far cheaper than guessing
+wrong.
 
 Mid-deploy, read the target before starting anything: if it reports every task's merge, the deploy
 ran — verify it. Otherwise look for a deploy still running, such as a live `…-deploy-<feature>`
