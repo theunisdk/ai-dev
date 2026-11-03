@@ -292,15 +292,13 @@ leftover; it goes in the digest. A `gh` call that failed is not `no Refs`: name 
 whose lookup failed in the digest.
 
 Once the sweep is clean, delete the proportion-check job with `CronDelete` (`CronList` gives its
-ID), then send one notice:
-`tg-notify "✅ <session-name> done — safe to close: <one-line summary>"` (exit 0 sent, 1 failed,
-3 not configured). The final message's first line is `✅ DONE — safe to close <session-name>`, then
-one digest: what shipped and its PR links, what was deployed and the evidence it is live (or why it
-wasn't deployed), the decisions taken and who took them, anything deferred or logged as an issue, and
-the issues each merged PR references (or `no Refs`). List the open ones as ready to close if the
-deploy is verified, or as open until it is. Name any already closed as closed before verification.
-Don't close them unless the user asks. If `tg-notify` did not exit 0, say the notice was
-not sent. Same filter as Step 4 — the digest is what happened, not a transcript of how.
+ID). The final message's first line is `✅ DONE — safe to close <session-name>`, then one digest:
+what shipped and its PR links, what was deployed and the evidence it is live (or why it wasn't
+deployed), the decisions taken and who took them, anything deferred or logged as an issue, and the
+issues each merged PR references (or `no Refs`). List the open ones as ready to close if the deploy
+is verified, or as open until it is. Name any already closed as closed before verification. Don't
+close them unless the user asks. Same filter as Step 4 — the digest is what happened, not a
+transcript of how.
 
 ## The State line
 
