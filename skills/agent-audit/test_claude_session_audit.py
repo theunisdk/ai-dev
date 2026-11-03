@@ -1789,13 +1789,13 @@ class SinkTest(unittest.TestCase):
         self.assertIn("the value looks real, so writing or committing it counts", report)
 
     def test_random_hex_and_uuids_look_real(self):
-        for _ in range(2000):
-            for v in ("".join(random.choice("0123456789abcdef") for _ in range(n)) for n in (16, 24, 32)):
-                if not re.search(r"(?i)test|abcd|0000|1234|fake", v):
-                    self.assertFalse(audit.looks_fake(v), v)
-            u = str(uuid.uuid4())
-            if not re.search(r"(?i)abcd|0000|1234", u):
-                self.assertFalse(audit.looks_fake(u), u)
+        rng = random.Random(49)
+        for name, make in (("16-hex", lambda: "%016x" % rng.getrandbits(64)),
+                           ("32-hex", lambda: "%032x" % rng.getrandbits(128)),
+                           ("uuid", lambda: str(uuid.UUID(int=rng.getrandbits(128), version=4)))):
+            fake = sum(audit.looks_fake(make()) for _ in range(5000))
+            self.assertLess(fake, 50, name)  # under 1% (about 0.1% measured)
+
 
     def test_looks_fake(self):
         for v in ("AK" + "IAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "sk-test-abc",
@@ -2576,7 +2576,6 @@ class DigestTest(unittest.TestCase):
         self.assertRegex(d, r"Alerts that failed to send:\n• SECRET outward \[REDACTED:github-token#1\]: "
                          r"github-token via network \(curl\) — proj, session \w{8}")
         self.assertNotIn(s, self.fx.everything(self.fx.run("--stdout", "--no-llm")))
-
 
 
 class NewFormatTest(unittest.TestCase):

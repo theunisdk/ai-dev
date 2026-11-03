@@ -1040,7 +1040,7 @@ _FAKE_MARKERS = re.compile(r"fake|test|example|dummy|sample|mock|placeholder|cha
 def looks_fake(value):
     """Whether a value reads as made up: a published doc example, a marker word, a long
     run of one character, a short repeated chunk, or only a handful of distinct
-    characters. Entropy alone would pass random hex and UUIDs as fake."""
+    characters."""
     return (any(x in value for x in _DOC_EXAMPLES) or _FAKE_MARKERS.search(value) is not None
             or re.search(r"(.)\1{5,}|(.{2,8})\2{3,}", value) is not None
             or len(set(value)) < 6)
@@ -1954,7 +1954,6 @@ def batch(sections):
 RANK = ["CLEAN", "UNREVIEWED", "UNCLEAR", "REVIEW-FAILED", "FLAGGED", "CRITICAL"]
 ALERT_LIMIT = 3500       # Telegram refuses over 4096 chars and tg-notify doesn't truncate
 ALERT_LINE_LIMIT = 320
-
 ALERT_ITEMS = 8          # bullets in one alert; the rest are counted
 PROBLEM_REALERT = dt.timedelta(hours=24)  # a problem that persists alerts once a day
 
@@ -2120,7 +2119,7 @@ DIGEST_HOUR_UTC = 5      # 07:00 SAST
 KEEP_RECORDS = dt.timedelta(hours=48)
 RUN_GAP = dt.timedelta(minutes=90)  # more than this between runs means a run was missed
 DIGEST_CATEGORIES = 5    # categories listed, each with up to two one-liners
-DIGEST_LINE_LIMIT = 200
+DIGEST_LINE_LIMIT = 260
 
 
 def digest_boundary(now, hour):
