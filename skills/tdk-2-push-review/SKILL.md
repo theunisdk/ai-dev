@@ -260,12 +260,12 @@ gh pr merge <PR> --squash --delete-branch
 ```
 **Always pass `--delete-branch`** — branches get cleaned up on every merge, so don't ask. The repo doesn't auto-delete, so omitting it strands the branch on the remote. Then confirm `gh pr view <PR> --json state` says `MERGED` and close the issues as below.
 
-**Close the issues.** A merged PR is done work: right after the merge, close each issue it fully resolves. Don't wait for a deploy, and don't ask. For each issue the body `Refs`, in `<issue-repo>` (this repo for `#<n>`, else the one named):
+**Close the issues.** A merged PR is done work: right after the merge, close each issue it fully resolves. Don't wait for a deploy, and don't ask. Read the body with `gh pr view <PR> -R <owner/repo> --json body -q .body`. For each issue it `Refs`, in `<issue-repo>` (this repo for `#<n>`, else the one named):
 ```bash
 gh issue close <n> -R <issue-repo> --comment "Done in #<PR>."                         # fully resolved
 gh issue comment <n> -R <issue-repo> --body "Partly done in #<PR>. Left: <what is left>."  # covered in part: stays open
 ```
-For an issue in another repo, write the PR as `<owner/repo>#<PR>` so the link resolves. Then check each with `gh issue view <n> -R <issue-repo> --json state -q .state`: `CLOSED` for the ones you closed, `OPEN` for the rest. A failed call is not a close: report the issue and the error. A PR that did not reach `MERGED` closes nothing. With no `Refs` in the body, there is nothing to close; report `no Refs`.
+For an issue in another repo, write the PR's own `<owner/repo>#<PR>` so the link resolves. Then check each with `gh issue view <n> -R <issue-repo> --json state -q .state`: `CLOSED` for the ones you closed, `OPEN` for the rest. A failed call, close or comment, is a failure: report the issue and the error. A PR that did not reach `MERGED` closes nothing. With no `Refs` in the body, there is nothing to close; report `no Refs`. A failed body read is not `no Refs`: report the error.
 
 ## Quick reference
 
