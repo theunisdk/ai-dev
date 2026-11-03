@@ -63,8 +63,9 @@ the repo's deploy runs (a deploy worker, or CI on merge) and the PM verifies it 
 only after the user says go to the deploy. When the request itself says otherwise (e.g. "merge
 only", "don't deploy"), follow it.
 
-Then post the breakdown in chat: numbered tasks, each with scope, repo, dependencies, and an
-observable definition of done; what runs in parallel versus what is serial; anything you would hold
+Then post the breakdown in chat: numbered tasks, each with scope, repo, dependencies, an expected
+wall-clock time (`~1h`), a short list of what it builds (`export script, bucket, upload`; never a
+line count, since a long prompt edit can be trivial), and an observable definition of done; what runs in parallel versus what is serial; anything you would hold
 back until another task lands; and each repo's deploy — its command, "auto on merge to `main`", or
 "none found" (after checking its docs, CI workflows, and `gh api repos/<owner>/<repo>/deployments`).
 Where `main` deploys on merge, approving the breakdown approves every merge shipping — so if the
@@ -88,14 +89,19 @@ than from memory. Never add the worktree or the tmux session yourself.
 - Only parallelise genuinely independent tasks. Two workers in the same file is a merge conflict you
   will have to bounce back.
 
+After the first spawn, create one recurring `CronCreate` job for the whole feature, cron `7 * * * *`,
+prompt: `Run the "Proportion check" section of the tdk-3-is-pm skill for every live worker.` It is
+session-only and fires only while you are idle, which is when a worker can spiral unwatched.
+
 ## Step 3 — The brief
 
 Workers have **zero** conversation context — the brief carries the entire protocol. Pass it to
 `claude-spawn` on stdin (the `-`); follow-ups go by `SendMessage`:
 
 ```
-GOAL: <one sentence — the whole feature, so you can judge trade-offs inside your task>
+GOAL: "<the user's ask, verbatim>" — <one sentence: the whole feature, so you can judge trade-offs>
 YOUR TASK: <scope, concretely>
+EXPECTED: <wall-clock time from the breakdown>; builds <the list from the breakdown>
 NOT YOUR TASK: <the adjacent things other workers own>
 WORKTREE: <repo>/.claude/worktrees/<task>, already created, on branch feat/<task>
 DONE MEANS: <observable and testable>
@@ -126,7 +132,7 @@ its own task, and any question the goal plus the breakdown already answers.
 that disagrees with its brief gets its reasoning read first — if it is right, re-brief it. That is
 your call, not an escalation.
 
-**Escalate — four categories only:**
+**Escalate — five categories only:**
 
 | Escalate | Because |
 |----------|---------|
@@ -134,6 +140,7 @@ your call, not an escalation.
 | A decision that changes scope or a contract | it changes what gets built, or breaks something outside the task |
 | A merge that failed its verification gate | Step 5 |
 | A deploy that failed, or left the target broken | rolling back or fixing forward is the user's call |
+| Work out of proportion to the ask | the proportion check said yes; cut, ship, or continue is his call |
 
 Every escalation carries your recommendation and your reason — not a paste. If you cannot state a
 recommendation, you do not yet understand the problem well enough to interrupt him.
@@ -146,6 +153,18 @@ waiting at a prompt? The two look identical from here, so resolve it with `ListA
 `SendMessage` rather than assuming. When `ListAgents` shows a worker `waiting` or `idle` with no
 report, read its pane (`tmux capture-pane -p -t "<name>:"`) or message it: it may be holding a
 question it never sent, or sitting at a permission prompt only the user can answer.
+
+## Proportion check
+
+The hourly job (Step 2) runs this. For each live worker, read the elapsed time since its last
+`[YYYY-MM-DD HH:MM:SS] <name> started` line in `~/.claude-rc.log`; the quoted ask and `EXPECTED` in
+its brief, `~/.local/state/claude-sessions/<name>.md`; and what it builds: `git -C <repo> diff
+--stat origin/main...feat/<task>`, `git -C <worktree> status --short`, and any spec or plan doc.
+Then ask: (a) is it past its expected time? (b) is it building something the user's words don't
+name? Compare with the quoted ask, not your breakdown: the breakdown can be where the bloat starts.
+(c) would the user look at this and say it isn't what he asked for? Any yes: message him at once
+with the numbers and your recommendation (cut, ship what exists, or continue) and why. All no:
+send nothing. A signal you can't read is not a no: say which one, for which worker.
 
 ## Step 5 — Decide the merge (only you send GO)
 
@@ -268,7 +287,8 @@ on the socket that listed it. Escalate a leftover that still holds work. A refer
 leftover; it goes in the digest. A `gh` call that failed is not `no Refs`: name the PR or issue
 whose lookup failed in the digest.
 
-Once the sweep is clean, send one notice:
+Once the sweep is clean, delete the proportion-check job with `CronDelete` (`CronList` gives its
+ID), then send one notice:
 `tg-notify "✅ <session-name> done — safe to close: <one-line summary>"` (exit 0 sent, 1 failed,
 3 not configured). The final message's first line is `✅ DONE — safe to close <session-name>`, then
 one digest: what shipped and its PR links, what was deployed and the evidence it is live (or why it
