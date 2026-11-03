@@ -244,13 +244,13 @@ That line goes in the Step 5 summary too.
 
 ## Step 5 — Confirm, then merge
 
-Present a short summary: PR link, the Step 1b `pre-pr-review:` line, what CodeRabbit findings you fixed, what you logged as issues (with links), the issues the body references with `Refs` (they stay open after merge), what you rejected and why, CI status, the `ACTIONABLE: …` line verbatim from a fresh `coderabbit.py threads --pr <PR>` run just before the summary (it carries the head's state, and counts threads you resolved since the last `wait`), and the Step 4b lines verbatim. A skipped PR also names which part of the skip rule it falls under. A kit-repo PR that went on past a rate limit (head state `RATE LIMITED`) says so, and reports the line exit 7's check printed, which must name that head. With no CodeRabbit, the Step 2 `CodeRabbit: not installed (…)` line replaces the `ACTIONABLE` line, and the findings and dispositions are the Step 1b review's.
+Present a short summary: PR link, the Step 1b `pre-pr-review:` line, what CodeRabbit findings you fixed, what you logged as issues (with links), the issues the body references with `Refs`, each marked fully resolved (you close it right after the merge) or covered in part (it stays open; name what is left), what you rejected and why, CI status, the `ACTIONABLE: …` line verbatim from a fresh `coderabbit.py threads --pr <PR>` run just before the summary (it carries the head's state, and counts threads you resolved since the last `wait`), and the Step 4b lines verbatim. A skipped PR also names which part of the skip rule it falls under. A kit-repo PR that went on past a rate limit (head state `RATE LIMITED`) says so, and reports the line exit 7's check printed, which must name that head. With no CodeRabbit, the Step 2 `CodeRabbit: not installed (…)` line replaces the `ACTIONABLE` line, and the findings and dispositions are the Step 1b review's.
 
 **If you are a managed worker**, send that summary to your PM session with `SendMessage` and wait for its `GO <PR> <sha>`. Don't push after reporting unless the PM sends work back; then fix it within your remaining rounds and report the new head. On GO, merge as a command of its own — `-R` keeps gh off your local branch, which you remove below, and `--match-head-commit` refuses a head that moved:
 ```bash
 gh pr merge <PR> -R <owner/repo> --squash --delete-branch --match-head-commit <sha>
 ```
-The verdict is `gh pr view <PR> -R <owner/repo> --json state`, not the exit code. Not `MERGED`: report the error to your PM and stop. `MERGED`: your last shell command is `test "$(git rev-parse HEAD)" = <sha> && git -C <main checkout> worktree remove <your worktree> && git -C <main checkout> branch -D <your branch>` — the worktree is your working directory, so nothing runs after it. If it refuses, don't `--force`. Report merged, any gh error, and anything left behind to your PM.
+The verdict is `gh pr view <PR> -R <owner/repo> --json state`, not the exit code. Not `MERGED`: report the error to your PM and stop. `MERGED`: close the issues as **Close the issues** below says, then your last shell command is `test "$(git rev-parse HEAD)" = <sha> && git -C <main checkout> worktree remove <your worktree> && git -C <main checkout> branch -D <your branch>` — the worktree is your working directory, so nothing runs after it. If it refuses, don't `--force`. Report merged to your PM: the issues you closed, the ones you left open (each with what is left), any gh error, and anything left behind.
 
 **Otherwise, ask the user to confirm the merge** — this is the pause they asked for.
 
@@ -258,7 +258,14 @@ On their go-ahead, squash-merge and delete the branch (the repo's convention —
 ```bash
 gh pr merge <PR> --squash --delete-branch
 ```
-**Always pass `--delete-branch`** — branches get cleaned up on every merge, so don't ask. The repo doesn't auto-delete, so omitting it strands the branch on the remote.
+**Always pass `--delete-branch`** — branches get cleaned up on every merge, so don't ask. The repo doesn't auto-delete, so omitting it strands the branch on the remote. Then confirm `gh pr view <PR> --json state` says `MERGED` and close the issues as below.
+
+**Close the issues.** A merged PR is done work: right after the merge, close each issue it fully resolves. Don't wait for a deploy, and don't ask. Read the body with `gh pr view <PR> -R <owner/repo> --json body -q .body`. For each issue it `Refs`, in `<issue-repo>` (this repo for `#<n>`, else the one named):
+```bash
+gh issue close <n> -R <issue-repo> --comment "Done in #<PR>."                         # fully resolved
+gh issue comment <n> -R <issue-repo> --body "Partly done in #<PR>. Left: <what is left>."  # covered in part: stays open
+```
+For an issue in another repo, write the PR's own `<owner/repo>#<PR>` so the link resolves. Then check each with `gh issue view <n> -R <issue-repo> --json state -q .state`: `CLOSED` for the ones you closed, `OPEN` for the rest. A failed call, close or comment, is a failure: report the issue and the error. A PR that did not reach `MERGED` closes nothing. With no `Refs` in the body, there is nothing to close; report `no Refs`. A failed body read is not `no Refs`: report the error.
 
 ## Quick reference
 

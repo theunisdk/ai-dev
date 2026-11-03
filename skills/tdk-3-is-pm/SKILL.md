@@ -19,8 +19,8 @@ with your recommendation attached — not five transcripts.
 **You do not do the work.** Concretely —
 
 You may: read anything in any repo; run read-only `git`/`gh` anywhere; write briefs, breakdowns, and
-messages; start workers with `claude-spawn` (Step 2); send GO to merge (Step 5); and start a deploy
-worker once the user says go (Step 6). Use subagents freely for your own reading — verifying a
+messages; start workers with `claude-spawn` (Step 2); send GO to merge (Step 5); close or comment on
+an issue a merged PR resolved (Steps 5, 7); and start a deploy worker once the user says go (Step 6). Use subagents freely for your own reading — verifying a
 claim, surveying a repo. That is not doing the work, and it keeps your context free for the board.
 
 You may not:
@@ -241,11 +241,17 @@ failed. If that worker has already spent its two `tdk-2` fix rounds (with no Cod
 send-backs), escalate.
 
 Send `GO <n> <headRefOid>` — the full SHA you verified, so the merge refuses a head that moved. The
-worker merges, removes `<repo>/.claude/worktrees/<task>` and its branch, and reports merged. Then
-confirm `gh pr view <n> -R <owner/repo> --json state` says `MERGED` and the worktree is gone from
-`git -C <repo> worktree list`, and only then `tmux kill-session -t "=<name>"`. Killing the session
-first strands a worker mid-merge. A worktree still listed goes back to its worker; escalate only if
-it holds work.
+worker merges, closes each issue the PR fully resolves, removes `<repo>/.claude/worktrees/<task>`
+and its branch, and reports merged with the issues it closed and those it left open, each with what
+is left. Then confirm `gh pr view <n> -R <owner/repo> --json state` says `MERGED`, the worktree is
+gone from `git -C <repo> worktree list`, and the issue list holds: every issue the PR body `Refs` is
+on it, and `gh issue view <i> -R <issue-repo> --json state -q .state` reads `CLOSED` for each it
+closed and `OPEN` for each it left open. A report with no list, or a `Refs` issue missing from it,
+goes back to the worker to say fully resolved or in part. Close an issue its list says the PR fully
+resolved that still reads `OPEN` yourself, as Step 7 does; one it left open that reads `CLOSED` goes
+in the digest. A failed `gh` call holds the kill until it succeeds. Only then
+`tmux kill-session -t "=<name>"`. Killing the session first strands a worker mid-merge. A worktree
+still listed goes back to its worker; escalate only if it holds work.
 
 ## Step 6 — Deploy (only after the user says go)
 
@@ -287,7 +293,7 @@ do, or the request was merge-only or had no deploy), sweep for leftovers first:
 tmux -L default ls; tmux -L claude-remote ls   # any <code>-… session other than this one
 git -C <repo> worktree list                    # every repo involved: no task or deploy worktree of yours
 gh pr view <n> -R <owner/repo> --json body -q .body          # each merged PR: the issues it Refs
-gh issue view <i> -R <issue-repo> --json state -q .state     # each: the PR's repo for #i, else the named one
+gh issue view <i> -R <issue-repo> --json state,comments    # each: the PR's repo for #i, else the named one
 ```
 
 `<session-name>` is `tmux display-message -p '#S'`, only when `$TMUX` is set, and `<code>` is
@@ -297,17 +303,19 @@ error, from tmux or git, is not a clean sweep. Each leftover goes back to its wo
 Step 5 rule: kill a session only after its PR is `MERGED` and its worktree is gone (a deploy
 worker: once its worktree is gone, as Step 6), with `tmux -L <socket> kill-session -t "=<name>"`
 on the socket that listed it. Escalate a leftover that still holds work. A referenced issue is not a
-leftover; it goes in the digest. A `gh` call that failed is not `no Refs`: name the PR or issue
-whose lookup failed in the digest.
+leftover; it goes in the digest. One still `OPEN` that its PR fully resolved (the worker's report
+says so) you close now, with `gh issue close <i> -R <issue-repo> --comment "Done in #<pr>."`
+(the PR's own `<owner/repo>#<pr>` for an issue in another repo). One the PR covered only in part
+stays open; if no comment names what is left, add one. One with no report of full or part goes in
+the digest as unknown, never left open as if in part. A `gh` call that failed is not `no Refs`: name the PR
+or issue whose lookup failed in the digest.
 
 Once the sweep is clean, delete the proportion-check job with `CronDelete` (`CronList` gives its
 ID). The final message's first line is `✅ DONE — safe to close <session-name>`, then one digest:
 what shipped and its PR links, what was deployed and the evidence it is live (or why it wasn't
-deployed), the decisions taken and who took them, anything deferred or logged as an issue, and the
-issues each merged PR references (or `no Refs`). List the open ones as ready to close if the deploy
-is verified, or as open until it is. Name any already closed as closed before verification. Don't
-close them unless the user asks. Same filter as Step 4 — the digest is what happened, not a
-transcript of how.
+deployed), the decisions taken and who took them, anything deferred or logged as an issue, and per
+merged PR the issues it closed and those left open with what is left (or `no Refs`). Same filter as
+Step 4 — the digest is what happened, not a transcript of how.
 
 ## The State line
 
@@ -356,4 +364,5 @@ can see in the conversation; if you can't tell whether the user gave go, ask.
 | "I'll forward this so he has the full context" | Forwarding is not filtering. Decide, then send a recommendation. |
 | "The worker disagrees with the brief — ask the user" | Read its reasoning. If it's right, re-brief. Your call. |
 | "Faster to spawn a session for this lookup" | A subagent is cheaper. Spawn for real tasks. |
+| "Merged, but the issue stays open until the deploy is verified" | Merged is done. Close it with `Done in #<pr>.`; only an issue the PR covered in part stays open. |
 | "Everything merged, I'm done" | Not until the sweep is clean and the first line says `✅ DONE — safe to close`. |
