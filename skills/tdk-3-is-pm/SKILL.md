@@ -204,10 +204,12 @@ Send GO only when **all** of these hold:
     `gh api 'repos/<owner>/<repo>/issues/<n>/comments?per_page=100' -q '[.[]|select(.user.login=="coderabbitai[bot]")]|length'`
     prints `0`). Any CodeRabbit status, review or comment means it is installed; the rows here apply.
   - `Review rate limited` in a repo with the review kit — passes only when the worker's line is
-    `pre-pr-review: /review — verdict <sha> covers HEAD` naming the head, you confirm it from the
-    first line of `<repo>/.claude/worktrees/<task>/.review/verdict.md` (`# Review verdict — <branch>
-    — <short-sha> — <date>`; gitignored, so not on GitHub) with `<short-sha>` a prefix of
-    `headRefOid`, and every finding is dispositioned: the kit's, and CodeRabbit's from earlier heads.
+    `pre-pr-review: /review — verdict <sha> covers HEAD` naming the head (not `incomplete`,
+    `fallback` or `secrets: not_scanned`), you confirm it from the first line of
+    `<repo>/.claude/worktrees/<task>/.review/verdict.md` (`# Review verdict — <branch> — <short-sha>
+    — <date>`; gitignored, so not on GitHub) with `<short-sha>` at least 4 hex characters and a
+    prefix of `headRefOid`, and every finding is dispositioned: the kit's, and CodeRabbit's from
+    earlier heads. A missing, unreadable or malformed header holds GO; send it back.
   - `Review rate limited` in a repo without the kit, `Review in progress`, any other description, or
     no `CodeRabbit` status otherwise — never a pass. CodeRabbit has not reviewed this head.
 - any review object you rely on as evidence is on the head SHA. A verdict on an older commit says
