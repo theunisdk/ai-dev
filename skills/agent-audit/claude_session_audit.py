@@ -428,6 +428,8 @@ _OPT_WITH_ARG = {"python": {"-W", "-X"}, "python3": {"-W", "-X"}, "ruby": {"-I",
                  "perl": {"-I", "-M"}, "node": {"-r", "--require", "--import"},
                  "bun": {"-r", "--require"}, "bash": {"-o", "-O"}, "sh": {"-o"}, "zsh": {"-o"}}
 _INPLACE = {"sed", "gsed", "perl", "ruby", "awk", "gawk"}
+NET_CODE_OUT = "network code written out with the secret"
+NET_CODE_FILED = "network code saved to a local file with the secret (not run in this command)"
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")
 _HEREDOC = re.compile(r"<<-?[ \t]*(['\"]?)([A-Za-z_][\w.-]*)\1")
 _SCRIPT = re.compile(r"[^/]*/.*|[^/]*\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|php)")
@@ -763,11 +765,15 @@ class SinkClassifier:
                     sink = _worst(sink, self.classify_path(target, base, "written by Bash"))
                 if holder and (targets or any(w.startswith("__HEREDOC_") for w in words)) \
                         and _NET_CODE.search(" ".join(full)):
-                    sink = _worst(sink, (UNSURE, "network code written out with the secret"))
+                    saved = targets and words is pipe[-1]  # into a file, not piped on
+                    sink = _worst(sink, (UNSURE, NET_CODE_FILED if saved else NET_CODE_OUT))
                 result = sink if result is None else _worst(result, sink)
                 fed = True
         if not found:
             return UNSURE, "secret not located in the parsed command"
+        if result == (UNSURE, NET_CODE_FILED) and any(
+                text.count(os.path.basename(f) or f) > 1 for f in files):
+            result = (UNSURE, NET_CODE_OUT)  # the file is used again: run, sent or copied
         return self._backstop(cmd, ph, result or (LOCAL, "shell variable only"), files)
 
     def _backstop(self, cmd, ph, result, files):
@@ -983,6 +989,8 @@ DEMOTION_KINDS = {  # kind -> what the reason says; EXEMPT ones never alert, eve
     "aws-key-id-alone": "an AWS access key ID with no secret key beside it",
     "placeholder": "placeholder"}
 EXEMPT_OUTWARD = {"test-fixture", "names-list"}  # test-fixture only for writes and commits of fixtures
+# A placeholder only saved into a local file beside network code: nothing was sent.
+PLACEHOLDER_QUIET_SINKS = {NET_CODE_FILED}
 
 
 def _entropy_per_char(v):
@@ -1067,9 +1075,13 @@ def summarize_secrets(exposed, red, globs, memory):
             fixture_ok = False
         else:
             fixture_ok = True
-        exempt = dem is not None and (dem[0] == "names-list" or dem[0] == "test-fixture" and fixture_ok
-                                      and all(o.get("fixture_sink") for o in live
-                                              if o["class"] not in QUIET_CLASSES))
+        outward = [o for o in live if o["class"] not in QUIET_CLASSES]
+        filed = dem is not None and dem[0] == "placeholder" and bool(outward) and all(
+            o["sink"] in PLACEHOLDER_QUIET_SINKS for o in outward)
+        if filed:
+            dem = (dem[0], dem[1] + "; only saved to a local file, not sent")
+        exempt = dem is not None and (dem[0] == "names-list" or filed or dem[0] == "test-fixture"
+                                      and fixture_ok and all(o.get("fixture_sink") for o in outward))
         counts = bool(live) and cls not in QUIET_CLASSES and not exempt
         digest = memory.digest(value) if memory else None
         sessions = []
@@ -1781,6 +1793,9 @@ LOOSE_SEVERITY_RES = [re.compile(p, re.I) for p in (
     r"\bseverity\W{0,3}(?:CRITICAL|HIGH|MEDIUM|LOW)\b",
     r"\|\s*(?:CRITICAL|HIGH|MEDIUM|LOW)\s*\|")]
 _SEV_WORD = re.compile(r"\b(?:CRITICAL|HIGH|MEDIUM|LOW)\b", re.I)
+# Beside a session=: "(high)", "high severity". A bare word ("high-volume") is prose.
+TAGGED_SEVERITY_RE = re.compile(r"\(\s*(?:CRITICAL|HIGH|MEDIUM|LOW)\s*\)"
+                                r"|\b(?:CRITICAL|HIGH|MEDIUM|LOW)[ \t]+severity\b", re.I)
 URGENT = ("CRITICAL", "HIGH")  # severities that alert at once; the rest wait for the digest
 
 
@@ -1793,6 +1808,12 @@ def loose_severity(line):
     """The highest severity written loosely in one line, or None."""
     spans = [m.group(0) for rx in LOOSE_SEVERITY_RES for m in rx.finditer(line)]
     return _highest(" ".join(spans)) if spans else None
+
+
+def tagged_severity(line):
+    """The highest severity a session= line states: loosely written, "(high)" or "high
+    severity"; None for a severity word that is only prose."""
+    return loose_severity(line) or _highest(" ".join(TAGGED_SEVERITY_RE.findall(line)))
 
 
 # One finding line, as the prompt asks for it: "- [HIGH] [red-line] session=1a2b3c4d ..."
@@ -1810,12 +1831,12 @@ REPEAT_MARK = (" (REPEAT: this session and category already alerted in the last 
 def parse_review(review, known=(), memory=None):
     """Split one batch's review into finding entries. An entry starts, at any indentation,
     at a "- [SEV] [category]" line, a line with a severity written loosely, a list item
-    carrying session=<8 hex>, or an indented line carrying both session= and a severity
-    word; other lines are evidence or prose. Only a
+    carrying session=<8 hex>, or an indented line carrying both session= and a stated
+    severity ("(high)", "high severity"); other lines are evidence or prose. Only a
     bracketed entry for a session in known gets a dedupe key. Returns (the review with
-    repeats marked, entries, the model's summary line, the number of top-level list items
-    that are not entries). Each entry: sev (None when no known severity can be read), cat,
-    sess, key, repeat, line."""
+    repeats marked, entries, the model's summary line, the number of list items at any
+    indent that are not entries). Each entry: sev (None when no known severity can be
+    read), cat, sess, key, repeat, line."""
     lines = review.splitlines()
     first = next((i for i, l in enumerate(lines) if l.strip()), None)
     summary = (next((l.strip() for l in lines[first + 1:] if l.strip()), "")
@@ -1834,10 +1855,10 @@ def parse_review(review, known=(), memory=None):
                 sev = loose
             cat = (m.group(2) or "").lower()
         elif loose_severity(line) or (SESSION_TAG_RE.search(line) and (
-                LIST_ITEM_RE.match(line) or line[:1] in (" ", "\t") and _highest(line))):
-            sev, cat = loose_severity(line) or _highest(line), ""
+                LIST_ITEM_RE.match(line) or line[:1] in (" ", "\t") and tagged_severity(line))):
+            sev, cat = tagged_severity(line), ""
         else:
-            plain += line[:1] not in (" ", "\t") and LIST_ITEM_RE.match(line) is not None
+            plain += LIST_ITEM_RE.match(line) is not None
             report.append(line)
             continue
         sm = FINDING_SESSION_RE.search(line)
@@ -2296,7 +2317,7 @@ def build_digest(host, records, start, now, notes, first=False):
             lines.append(f"Repeats (already alerted): {repeat_findings} finding(s), "
                          f"{len(repeat_secrets)} secret(s)")
         if unparsed_items:
-            lines.append(f"Unparsed list lines beside repeat findings: {unparsed_items} (see the reports)")
+            lines.append(f"Unparsed list lines beside findings: {unparsed_items} (see the reports)")
         for kind, hits in sorted(problems.items()):
             t, text = hits[-1]
             lines.append(f"Problem {kind} ×{len(hits)} (last {hm(t)}: {clip(text, 120)})")
@@ -2632,7 +2653,7 @@ def run(args, red, host):
     timeline_doc = header + timeline
 
     verdict, review = "UNREVIEWED", "(model review skipped: --no-llm)"
-    entries, critical, unparsed, review_notes, beside_repeats = [], [], [], [], 0
+    entries, critical, unparsed, review_notes, beside_findings = [], [], [], [], 0
     if reviewing:
         batches = [(ask_log + "\n" + b, sess) for b, sess in batch(sections)]
         guard("the model input", timeline_doc, *(b for b, _ in batches))
@@ -2651,8 +2672,8 @@ def run(args, red, host):
             # model never saw.
             text, got, summary, plain = parse_review(red.clean(raw), batch_sessions, findings)
             entries += got
-            if v == "FLAGGED" and got and all(e["repeat"] for e in got):
-                beside_repeats += plain
+            if v in ("FLAGGED", "CRITICAL") and got:
+                beside_findings += plain
             verdicts.append(v)
             if v == "CRITICAL" and not any(e["sev"] == "CRITICAL" for e in got):
                 critical.append(summary or "(no summary line)")
@@ -2792,7 +2813,7 @@ def run(args, red, host):
         repeat_findings=repeat_findings,
         secrets=[{"id": x["_id"], "type": x["type"], "bucket": bucket(x), "repeat": x["repeat"]}
                  for x in live],
-        allowlisted=len(spared), unparsed_items=beside_repeats,
+        allowlisted=len(spared), unparsed_items=beside_findings,
         ids_off=bool(memory is not None and memory.key is None),
         failed_items=[red.clip(one_line(i), DIGEST_LINE_LIMIT) for i in items] if status == "failed" else [],
         problems=[{"kind": k, "text": red.clip(t, 200)} for k, t in problems])
