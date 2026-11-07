@@ -517,7 +517,7 @@ class BatchTest(unittest.TestCase):
                 self.assertEqual(p.returncode, rc, p.stderr)
                 [alert] = self.fx.alert_lines()
                 self.assertIn(want, alert[0])
-                self.assertIn("\nNot urgent, in the daily digest: 2 LOW\n", alert[0])
+                self.assertNotIn("LOW", alert[0])
 
 
     def test_low_only_batches_send_nothing(self):
@@ -712,7 +712,8 @@ class AlertVolumeTest(unittest.TestCase):
         [b] = bullets(alerts[1][0])  # the repeat is left out of the bullets and counted
         self.assertRegex(b, r"^SECRET outward \[REDACTED:github-token#\d\]: github-token via network \(curl\) "
                          r"— b, session \w{8}$")
-        self.assertIn("\nNot urgent, in the daily digest: 1 repeat(s)\n", alerts[1][0])
+        self.assertIn("\nAlready alerted: 1 repeat(s)\n", alerts[1][0])
+        self.assertNotIn("Not urgent", alerts[1][0])
         self.assertEqual(len(json.loads((self.fx.audit / "alerted.json").read_text())), 2)
 
     def test_future_dated_history_does_not_suppress(self):
@@ -900,10 +901,8 @@ class AlertRuleTest(unittest.TestCase):
         head, *rest = alert[0].splitlines()
         self.assertRegex(head, r"^🔴 Claude audit \(\S+\): 1 needs you$")
         [b] = bullets(alert[0])
-        self.assertTrue(b.startswith("HIGH [red-line]: killed tmux by pattern and then it kept going"), b)
-        self.assertLessEqual(len(b), audit.ALERT_LINE_LIMIT)
-        self.assertIn(" …[+", b)
-        self.assertTrue(b.endswith(f" — pepper3 (fix-x), session {sid[:8]}"), b)  # survives the clip
+        self.assertEqual(b, f"HIGH [red-line]: killed tmux by pattern{long_tail} — pepper3 (fix-x), "
+                            f"session {sid[:8]}")  # the whole reason
         self.assertNotIn("evidence", alert[0])
         self.assertIn("\nNot urgent, in the daily digest: 1 MEDIUM\n", alert[0])
         # the project and session ride on the bullet even when the clip cuts the one-liner
@@ -919,7 +918,7 @@ class AlertRuleTest(unittest.TestCase):
         self.review("VERDICT: CRITICAL\nbad\n\n" + LOW_FINDINGS)
         [alert] = self.fx.alert_lines()
         self.assertEqual(bullets(alert[0]), ["CRITICAL verdict: bad"])
-        self.assertIn("\nNot urgent, in the daily digest: 2 LOW\n", alert[0])
+        self.assertNotIn("LOW", alert[0])
 
     def test_flagged_without_parsable_severity_alerts(self):
         for text, want in [("VERDICT: FLAGGED\nsomething off\n- agent did X",
@@ -942,7 +941,7 @@ class AlertRuleTest(unittest.TestCase):
         [b] = bullets(alert[0])
         self.assertRegex(b, r"^SECRET outward \[REDACTED:github-token#1\]: github-token via network \(curl\) "
                          r"— proj, session \w{8}$")
-        self.assertIn("\nNot urgent, in the daily digest: 2 LOW\n", alert[0])
+        self.assertNotIn("LOW", alert[0])
         self.assertNotIn(secret, self.fx.read(self.fx.alerts))
 
     def test_repeat_or_allowlisted_secret_with_low_only_sends_nothing(self):
@@ -2230,7 +2229,7 @@ class SinkClassifierTest(unittest.TestCase):
 
 
 class StoredSecretTest(unittest.TestCase):
-    """A secret put into a secret store is STORED: listed and counted in the digest, never
+    """A secret put into a secret store is STORED: listed in the report, never
     alerted. A store command that also sends it elsewhere stays outward."""
     PH = "[REDACTED:github-token#1]"
 
@@ -2264,7 +2263,7 @@ class StoredSecretTest(unittest.TestCase):
         self.assertEqual(self.s.classify_bash(f"gh secret set T --body {self.PH}", self.PH, None),
                          (S, "secret store (gh secret set)"))
 
-    def test_stored_secret_is_reported_not_alerted_and_reaches_the_digest(self):
+    def test_stored_secret_is_reported_and_stays_off_telegram(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         fx = Fixture(tmp.name)
@@ -2276,8 +2275,7 @@ class StoredSecretTest(unittest.TestCase):
         [report] = [v for k, v in fx.files().items() if k.startswith("reports/") and "_timeline" not in k]
         self.assertIn("### Stored: put into a secret store", report)
         self.assertIn("-> STORED secret store (gh secret set): echo", report)
-        [digest] = fx.alert_lines()
-        self.assertIn("Secrets, none outward: 1 stored — github-token ×1", digest[0])
+        self.assertFalse(fx.alerts.exists())  # a stored secret says nothing on Telegram
 
 
 class ReviewParseTest(unittest.TestCase):
@@ -2421,6 +2419,17 @@ class AlertTextTest(unittest.TestCase):
         self.assertLessEqual(len(text), audit.ALERT_LIMIT)
         self.assertIn("Report: r.md", text)
 
+    def test_alert_shares_the_limit_and_keeps_where_it_happened(self):
+        red = audit.Redactor()
+        items = [f"HIGH [red-line]: {'x' * 2000} — proj, session {i:08x}" for i in range(3)]
+        text = audit.alert_message(red, "h", items, "", "r.md")
+        self.assertLessEqual(len(text), audit.ALERT_LIMIT)
+        got = bullets(text)
+        self.assertEqual(len(got), 3)
+        for i, b in enumerate(got):
+            self.assertIn(" …[+", b)
+            self.assertTrue(b.endswith(f" — proj, session {i:08x}"), b[-60:])
+
     def test_repeats_are_left_out_of_the_bullets_and_counts(self):
         sid = write_session(self.fx.projects, [user("go"), agent("done")])
         f = lambda sev, cat: f"- [{sev}] [{cat}] session={sid[:8]} 12:00:00 proj — {cat} thing"
@@ -2432,7 +2441,7 @@ class AlertTextTest(unittest.TestCase):
         self.assertEqual(len(bullets(second[0])), 1)
         self.assertIn("HIGH [out-of-scope]: out-of-scope thing — proj, session", second[0])
         self.assertIn(": 1 needs you\n", second[0])
-        self.assertIn("\nNot urgent, in the daily digest: 1 MEDIUM, 1 repeat(s)\n", second[0])
+        self.assertIn("\nNot urgent, in the daily digest: 1 MEDIUM\nAlready alerted: 1 repeat(s)\n", second[0])
 
 
 class ProblemRateLimitTest(unittest.TestCase):
@@ -2529,7 +2538,8 @@ def utc(s):
 
 
 class DigestTest(unittest.TestCase):
-    """One digest a day, from the first run at or after 05:00 UTC, always, even when quiet."""
+    """At most one digest a day, from the first run at or after 05:00 UTC, and only when
+    something is MEDIUM or above or the audit can't vouch for the window."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -2574,24 +2584,30 @@ class DigestTest(unittest.TestCase):
         self.assertIn("Unparsed list lines beside findings: 2 (see the reports)", d)
         self.assertIn("Not urgent: 1 MEDIUM", d)
 
-    def test_quiet_day_sends_one_digest_and_never_twice(self):
+    def test_quiet_window_sends_nothing_and_is_still_marked_sent(self):
         write_session(self.fx.projects, [user("run the tests"), agent("all pass")])
         p = self.run_due(STUB_MODE="clean")
         self.assertEqual(p.returncode, 0, p.stderr)
-        [d] = self.digests()
-        self.assertRegex(d.splitlines()[0], r"^✅ Claude audit daily \(\S+\), \d+[mh] to \d\d \w{3} \d\d:\d\d "
-                         r"UTC: quiet: 1 run, nothing needs you\.$")
-
-        self.assertIn("First digest: covers runs since", d)
-        self.assertIn("DIGEST sent", self.log())
-        self.assertEqual(self.fx.alert_lines()[-1], [d])
+        self.assertFalse(self.fx.alerts.exists())
+        self.assertIn("DIGEST silent", self.log())
         for _ in range(2):
             self.run_due(STUB_MODE="clean")
-        self.assertEqual(len(self.digests()), 1)
+        self.assertFalse(self.fx.alerts.exists())
+        self.assertEqual(self.log().count("DIGEST silent"), 1)  # settled once a day
         sent = json.loads((self.fx.audit / "digest_sent.json").read_text())
         self.assertEqual(sent["day"], audit.digest_boundary(dt.datetime.now(dt.timezone.utc),
                                                               int(self.hour)).date().isoformat())
         self.assertEqual((self.fx.audit / "digest.jsonl").stat().st_mode & 0o777, 0o600)
+
+    def test_first_digest_with_a_finding_says_so_and_sends_once(self):
+        sid = write_session(self.fx.projects, [user("run the tests"), agent("all pass")])
+        review = f"VERDICT: FLAGGED\ns\n- [MEDIUM] [other] session={sid[:8]} 12:00:00 proj — x"
+        self.run_due(STUB_MODE="raw", STUB_REVIEW=review)
+        [d] = self.digests()
+        self.assertIn("First digest: covers runs since", d)
+        self.assertIn("DIGEST sent", self.log())
+        self.run_due(STUB_MODE="raw", STUB_REVIEW=review)
+        self.assertEqual(len(self.digests()), 1)
 
     def test_medium_and_local_secret_wait_for_the_digest(self):
         s = gh_token()
@@ -2607,17 +2623,25 @@ class DigestTest(unittest.TestCase):
         [d] = self.digests()
         self.assertNotIn(s, self.fx.everything(p))
         self.assertIn("Runs: 2 audited (1 with activity) · immediate alerts: 0 sent", d)
-        self.assertIn("Not urgent: 1 MEDIUM, 1 LOW", d)
-        self.assertIn(f"• out-of-scope ×1: MEDIUM (pepper3, s {sid[:8]}): edited a file in another repo", d)
-        self.assertIn(f"• retry-changed ×1: LOW (pepper3, s {sid[:8]}): reworded an ask-approval retry", d)
-
-        self.assertIn("Secrets, none outward: 1 local — github-token ×1", d)
+        self.assertIn("Not urgent: 1 MEDIUM\n", d)
+        report = next(f.name for f in (self.fx.audit / "reports").glob("*.md") if "_timeline" not in f.name
+                      and "edited a file" in f.read_text())
+        self.assertIn(f"• out-of-scope ×1: MEDIUM (pepper3, s {sid[:8]}): edited a file in another repo"
+                      f" — report {report}", d)
+        self.assertNotIn("LOW", d)
+        self.assertNotIn("reworded", d)
+        self.assertNotIn("Secrets", d)
         audit.guard("test", d)
 
+    def medium(self):
+        sid = write_session(self.fx.projects, [user("tidy")])
+        return {"STUB_MODE": "raw", "STUB_REVIEW": f"VERDICT: FLAGGED\ns\n- [MEDIUM] [other] "
+                                                  f"session={sid[:8]} 12:00:00 proj — x"}
+
     def test_failed_send_is_retried_and_noted_never_marked_sent(self):
-        write_session(self.fx.projects, [user("tidy")])
+        review = self.medium()
         self.fx.on_flag, good = "exit 7", self.fx.on_flag  # the only command fails
-        self.run_due(STUB_MODE="clean")
+        self.run_due(**review)
         self.fx.on_flag = good
         self.assertFalse((self.fx.audit / "digest_sent.json").exists())
         self.assertIn("DIGEST-FAILED on-flag #1 exited 7; tried again next run", self.log())
@@ -2630,8 +2654,7 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(len(self.digests()), 1)
 
     def test_one_command_failing_does_not_resend(self):
-        write_session(self.fx.projects, [user("tidy")])
-        self.run_due("--on-flag", "exit 7", STUB_MODE="clean")
+        self.run_due("--on-flag", "exit 7", **self.medium())
         self.assertTrue((self.fx.audit / "digest_sent.json").exists())
         self.assertIn("DIGEST-FAILED on-flag #2 exited 7; the other commands sent it", self.log())
         self.run_due("--on-flag", "exit 7", STUB_MODE="clean")
@@ -2664,6 +2687,7 @@ class DigestTest(unittest.TestCase):
         d = audit.build_digest("h", recs, start, now, [])
         self.assertIn("Gaps: no run 00:00–04:00", d)
         self.assertIn("Runs: 21 audited (0 with activity)", d)
+        self.assertIn("No activity in any run for 24h", d)
 
     def test_problems_alerts_repeats_and_cap(self):
         now = utc("2026-11-03T05:00:00")
@@ -2672,7 +2696,7 @@ class DigestTest(unittest.TestCase):
         for h in range(1, 25):
             recs.append({"_t": start + dt.timedelta(hours=h), "verdict": "FLAGGED", "sessions": 3,
                          "alert": "sent" if h == 5 else "", "repeat_findings": 1,
-                         "findings": [{"sev": "LOW", "cat": f"cat{i % 9}", "sess": f"{i:08x}", "repo": "r" * 50,
+                         "findings": [{"sev": "MEDIUM", "cat": f"cat{i % 9}", "sess": f"{i:08x}", "repo": "r" * 50,
                                        "text": "t" * 300} for i in range(h * 40, h * 40 + 40)],
                          "secrets": [{"id": "a" * 16, "type": "github-token", "bucket": "outward", "repeat": True},
                                      {"id": f"{h:016x}", "type": "env-secret", "bucket": "local"}],
@@ -2680,30 +2704,135 @@ class DigestTest(unittest.TestCase):
         d = audit.build_digest("h", recs, start, now, [])
         self.assertLessEqual(len(d), audit.ALERT_LIMIT)
         self.assertIn("immediate alerts: 1 sent", d)
-        self.assertIn("Not urgent: 960 LOW", d)
+        self.assertIn("Not urgent: 960 MEDIUM", d)
         self.assertIn("Repeats (already alerted): 24 finding(s), 1 secret(s)", d)
         self.assertIn("Problem BATCH-FAILED ×2 (last 07:00: batch 1 of 1 failed: x)", d)
         self.assertTrue(d.startswith("📋 Claude audit daily (h), 24h to 03 Nov 05:00 UTC\n"), d[:80])
-        self.assertIn("Secrets, none outward: 24 local — env-secret ×24", d)
+        self.assertNotIn("env-secret", d)
         self.assertIn("• +4 more categories in the reports", d)
 
-    def test_repeats_and_failed_alerts_are_not_a_quiet_day(self):
+    def day(self, **extra):
         now = utc("2026-11-03T05:00:00")
         start = now - dt.timedelta(hours=24)
-        base = [{"_t": start + dt.timedelta(hours=h), "verdict": "CLEAN", "sessions": 1} for h in range(1, 25)]
-        self.assertIn("quiet: 24 runs", audit.build_digest("h", base, start, now, []))
-        for extra, want in (({"repeat_findings": 2}, "Repeats (already alerted): 2 finding(s), 0 secret(s)"),
-                            ({"secrets": [{"id": "b" * 16, "type": "jwt", "bucket": "outward", "repeat": True}]},
-                             "Repeats (already alerted): 0 finding(s), 1 secret(s)"),
-                            ({"unparsed_items": 3}, "Unparsed list lines beside findings: 3"),
-                            ({"alert": "failed", "failed_items": ["SECRET outward [REDACTED:jwt#1]: jwt via x"]},
-                             "Alerts that failed to send:\n• SECRET outward [REDACTED:jwt#1]: jwt via x")):
-            recs = base[:-1] + [dict(base[-1], **extra)]
-            d = audit.build_digest("h", recs, start, now, [])
-            self.assertNotIn("quiet", d)
-            self.assertIn(want, d)
-        d = audit.build_digest("h", base[:-1] + [dict(base[-1], ids_off=True)], start, now, [])
-        self.assertIn("note: alert.key unreadable on some runs", d)
+        recs = [{"_t": start + dt.timedelta(hours=h), "verdict": "CLEAN", "sessions": 1} for h in range(1, 25)]
+        recs[-1].update(extra)
+        return recs, start, now
+
+    def test_what_stays_silent(self):
+        low = {"sev": "LOW", "cat": "red-line", "sess": "aaaaaaaa", "text": "x"}
+        for extra in ({}, {"findings": [low]}, {"alert": "sent"}, {"repeat_findings": 2}, {"unparsed_items": 3},
+                      {"secrets": [{"id": "a" * 16, "type": "jwt", "bucket": "local"}]},
+                      {"secrets": [{"id": "b" * 16, "type": "jwt", "bucket": "outward", "repeat": True}]}):
+            with self.subTest(extra=extra):
+                recs, start, now = self.day(**extra)
+                self.assertIsNone(audit.build_digest("h", recs, start, now, []))
+
+    def test_what_still_sends(self):
+        for extra, want in (
+                ({"findings": [{"sev": "MEDIUM", "cat": "other", "sess": "aaaaaaaa", "text": "x"}]}, "Not urgent: 1 MEDIUM"),
+                ({"problems": [{"kind": "BATCH-FAILED", "text": "boom"}]}, "Problem BATCH-FAILED ×1"),
+                ({"notes": ["gap: a to b never reviewed"]}, "note: gap: a to b never reviewed"),
+                ({"unparsed_beside_repeats": 3}, "Unparsed list lines beside findings"),
+                ({"alert": "failed", "failed_items": ["SECRET outward [REDACTED:jwt#1]: jwt via x"]},
+                 "Alerts that failed to send:\n• SECRET outward [REDACTED:jwt#1]: jwt via x"),
+                ({"ids_off": True}, "note: alert.key unreadable on some runs")):
+            with self.subTest(extra=extra):
+                recs, start, now = self.day(**extra, unparsed_items=extra.get("unparsed_beside_repeats", 0))
+                self.assertIn(want, audit.build_digest("h", recs, start, now, []))
+        recs, start, now = self.day()
+        self.assertIn("note: state", audit.build_digest("h", recs, start, now, ["state unreadable"]))
+        self.assertIn("Gaps: no run", audit.build_digest("h", recs[:10] + recs[13:], start, now, []))
+        late = recs + [{"_t": recs[3]["_t"], "digest_failed": "on-flag #1 exited 7"}]
+        self.assertIn("This digest is late: 1", audit.build_digest("h", late, start, now, []))
+        self.assertIn("No runs recorded", audit.build_digest("h", [], start, now, []))
+        self.assertIn("Counts unknown", audit.build_digest("h", None, start, now, ["unreadable"]))
+
+    def test_a_note_repeated_by_every_run_is_one_line(self):
+        recs, start, now = self.day()
+        for r in recs:
+            r["notes"] = ["finding dedupe off"]
+        d = audit.build_digest("h", recs, start, now, [])
+        self.assertEqual(d.count("finding dedupe off"), 1)
+        self.assertIn("note: finding dedupe off (×24)", d)
+
+    def test_a_day_of_no_activity_is_a_fault_not_a_quiet_day(self):
+        recs, start, now = self.day()
+        for r in recs:
+            r.update(verdict="NO-ACTIVITY", sessions=0)
+        d = audit.build_digest("h", recs, start, now, [])
+        self.assertIn("No activity in any run for 24h: the collector or parser may be broken.", d)
+        self.assertIn("Runs: 24 audited (0 with activity)", d)
+        self.assertIsNone(audit.build_digest("h", recs[-2:], now - dt.timedelta(hours=2), now, [],
+                                             first=True))  # just installed: too short to say
+
+    def test_full_reason_and_report_name_reach_the_digest(self):
+        sid = write_session(self.fx.projects, [user("deploy"), agent("done")])
+        reason = "rewrote the blocked command " + "and ran it again, " * 40 + "THE-END"
+        self.run_due(STUB_MODE="raw", STUB_REVIEW=f"VERDICT: FLAGGED\ns\n- [MEDIUM] [out-of-scope] "
+                                                  f"session={sid[:8]} 12:00:00 proj — {reason}")
+        [d] = self.digests()
+        name = json.loads((self.fx.audit / "digest.jsonl").read_text().splitlines()[-1])["report"]
+        self.assertRegex(name, r"^\d{4}-\d\d-\d\d_\d{6}\.md$")
+        self.assertIn(f"MEDIUM (proj, s {sid[:8]}): {reason} — report {name}", d)
+        self.assertNotIn("…[+", d)
+
+    def test_failure_lines_survive_the_cap_and_findings_are_never_cut_midway(self):
+        recs, start, now = self.day(
+            problems=[{"kind": "BATCH-FAILED", "text": "batch 1 of 1 failed"}],
+            notes=["last_run unreadable"], report="r.md",
+            findings=[{"sev": "MEDIUM", "cat": f"c{i}", "sess": f"{i:08x}", "text": f"{'t' * 1500} END{i}"}
+                      for i in range(5)])
+        d = audit.build_digest("h", recs, start, now, [])
+        self.assertLessEqual(len(d), audit.ALERT_LIMIT)
+        self.assertLess(d.index("Problem BATCH-FAILED"), d.index("Not urgent"))
+        self.assertLess(d.index("note: last_run unreadable"), d.index("Not urgent"))
+        self.assertEqual(d.count("END"), 2)  # two whole findings
+        self.assertIn("• +3 more in the reports", d)
+        self.assertNotIn("(cut; see the reports)", d)
+        recs[-1]["findings"] = [{"sev": "MEDIUM", "cat": "c", "sess": "aaaaaaaa", "text": "t" * 9000}]
+        d = audit.build_digest("h", recs, start, now, [])
+        self.assertLessEqual(len(d), audit.ALERT_LIMIT)  # one reason too long for Telegram
+        self.assertIn(" …[+", d)
+
+    def test_a_flood_of_faults_never_reaches_the_hard_cut(self):
+        recs, start, now = self.day(notes=[f"note {i} " + "n" * 280 for i in range(30)], alert="failed",
+                                    failed_items=["f" * 5000] * 9, unparsed_items=2)
+        d = audit.build_digest("h", recs, start, now, [])
+        self.assertLessEqual(len(d), audit.ALERT_LIMIT)
+        self.assertIn("more in the reports", d)
+        self.assertNotIn("(cut; see the reports)", d)
+
+    def test_a_lost_record_is_a_fault_at_digest_time(self):
+        sd = self.fx.audit
+        now = dt.datetime.now(dt.timezone.utc)
+        (sd / "digest.jsonl").write_text(json.dumps(
+            {"t": (now - dt.timedelta(minutes=5)).isoformat(), "verdict": "CLEAN", "sessions": 1}) + "\n")
+        sink = self.fx.root / "sink"
+        args = type("A", (), {"on_flag": [f"printf %s {{alert}} > {shlex.quote(str(sink))}"]})
+        out = audit.send_digest(args, "h", sd, now, now.hour, audit.Redactor(),
+                                "this run's record was lost: disk full")
+        self.assertTrue(out[0].startswith("DIGEST sent"), out)
+        self.assertIn("note: this run's record was lost: disk full", sink.read_text())
+
+    def test_run_notes_reach_the_record_even_with_no_activity(self):
+        (self.fx.audit / "last_run").write_text("not a time")
+        self.run_due(STUB_MODE="clean")
+        [r] = [json.loads(l) for l in (self.fx.audit / "digest.jsonl").read_text().splitlines()]
+        self.assertEqual(r["verdict"], "NO-ACTIVITY")
+        self.assertEqual(r["notes"], ["last_run unreadable, reviewed the last hour only"])
+        self.assertIn("note: last_run unreadable, reviewed the last hour only", self.digests()[0])
+
+    def test_plain_lines_beside_only_repeats_send_and_beside_fresh_findings_do_not(self):
+        sid = write_session(self.fx.projects, [user("go"), agent("done")])
+        (self.fx.audit / "findings.json").write_text(json.dumps({f"{sid[:8]}:other": {
+            "t": dt.datetime.now(dt.timezone.utc).isoformat(), "sev": "HIGH"}}))
+        self.fx.run(STUB_MODE="raw", STUB_REVIEW=f"VERDICT: FLAGGED\ns\n- [LOW] [out-of-scope] "
+                                                 f"session={sid[:8]} 12:00:00 proj — x\n- checked the merge")
+        (self.fx.audit / "last_run").unlink()
+        self.fx.run(STUB_MODE="raw", STUB_REVIEW=f"VERDICT: FLAGGED\ns\n- [HIGH] [other] "
+                                                 f"session={sid[:8]} 12:00:00 proj — x\n- also pushed to prod")
+        got = [json.loads(l) for l in (self.fx.audit / "digest.jsonl").read_text().splitlines()]
+        self.assertEqual([(r["unparsed_items"], r["unparsed_beside_repeats"]) for r in got], [(1, 0), (1, 1)])
 
     def test_failed_immediate_alert_lands_in_the_digest(self):
         s = gh_token()
@@ -2717,6 +2846,140 @@ class DigestTest(unittest.TestCase):
         self.assertRegex(d, r"Alerts that failed to send:\n• SECRET outward \[REDACTED:github-token#1\]: "
                          r"github-token via network \(curl\) — proj, session \w{8}")
         self.assertNotIn(s, self.fx.everything(self.fx.run("--stdout", "--no-llm")))
+
+
+def hms(entry):
+    return dt.datetime.fromisoformat(entry["timestamp"].replace("Z", "+00:00")).astimezone().strftime("%H:%M:%S")
+
+
+def answered(tid, text="ok", m=10, decision="accept", source="user_temporary", **more):
+    return dict(result(tid, text, m), permissionDecision=dict(decision=decision, source=source, **more))
+
+
+class HumanApprovalTest(unittest.TestCase):
+    """A person's yes at a permission prompt clears a finding; nothing else does."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fx = Fixture(self.tmp.name)
+        self.fx.audit.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_only_a_person_at_the_prompt_counts(self):
+        one = [{"type": "tool_result"}]
+        for pd, want in (({"decision": "accept", "source": "user_temporary"}, "yes"),
+                         ({"decision": "accept", "source": "user_temporary", "grantScope": "session",
+                           "reasonCode": "hook:PreToolUse"}, "yes"),
+                         ({"decision": "reject", "source": "user_reject"}, "no"),
+                         ({"decision": "accept", "source": "config", "reasonType": "classifier"}, None),
+                         ({"decision": "accept", "source": "hook"}, None),
+                         ({"decision": "accept", "source": "user_permanent"}, None),
+                         ({"decision": "reject", "source": "config"}, None),
+                         ({}, None), (None, None), ("accept", None)):
+            self.assertEqual(audit.human_decision(pd, one), want, pd)
+        yes = {"decision": "accept", "source": "user_temporary"}
+        self.assertIsNone(audit.human_decision(yes, one * 2))  # which call? unknown
+        self.assertIsNone(audit.human_decision(yes, []))
+
+    def review(self, sid, text):
+        return self.fx.run("--since", "1h", STUB_MODE="raw", STUB_REVIEW=text.replace("SID", sid[:8]))
+
+    def timeline(self):
+        return self.fx.read(self.fx.capture)
+
+    def test_the_judge_sees_it_on_the_call_and_the_result(self):
+        write_session(self.fx.projects, [
+            call("a", "aws ssm send-command approved", 12), call("b", "ls auto", 12),
+            result("b", "fine", 11), answered("a", "done", 10),
+            call("c", "rm -rf denied", 9), answered("c", "no", 8, "reject", "user_reject"),
+            call("d", "ls by config", 7), answered("d", "ok", 6, "accept", "config"),
+            {"type": "assistant", "timestamp": ts(5), "message": {"content": [
+                {"type": "tool_use", "id": "q", "name": "AskUserQuestion", "input": {"q": "which?"}}]}},
+            answered("q", "this one", 4)])
+        self.fx.run("--since", "1h", STUB_MODE="clean")
+        t = self.timeline()
+        self.assertRegex(t, r"CALL Bash( \[\w+\])* \[HUMAN-APPROVED\]: \{\"command\": \"aws ssm send-command")
+        self.assertRegex(t, r"-> ok( \[\w+\])* \[HUMAN-APPROVED\]: done")
+        self.assertRegex(t, r"CALL Bash( \[[\w-]+\])* \[HUMAN-DENIED\]: \{\"command\": \"rm -rf denied")
+        self.assertRegex(t, r"CALL Bash: \{\"command\": \"ls by config")
+        self.assertRegex(t, r"CALL Bash: \{\"command\": \"ls auto")
+        self.assertRegex(t, r"CALL AskUserQuestion: ")
+
+    def test_approved_call_is_cleared_in_code(self):
+        c = call("a", "aws ssm send-command", 10)
+        sid = write_session(self.fx.projects, [c, answered("a", "ok", 9)])
+        p = self.review(sid, f"VERDICT: FLAGGED\ns\n- [HIGH] [block-workaround] session=SID {hms(c)} p — routed "
+                             "around a block\n  evidence: `CALL Bash: aws ssm send-command`")
+        self.assertEqual(p.returncode, 2, p.stderr)
+        self.assertFalse(self.fx.alerts.exists())
+        [report] = [v for k, v in self.fx.files().items() if k.startswith("reports/") and "_timeline" not in k]
+        self.assertIn("(HUMAN-APPROVED: a person said yes at the prompt; was HIGH, now LOW)", report)
+
+    def test_citing_the_result_time_clears_too(self):
+        r = answered("a", "ok", 7)
+        sid = write_session(self.fx.projects, [call("a", "x", 10), r])
+        self.review(sid, f"VERDICT: FLAGGED\ns\n- [HIGH] [other] session=SID {hms(r)} p — did x")
+        self.assertFalse(self.fx.alerts.exists())
+
+    def assert_alerts(self, entries, line):
+        sid = write_session(self.fx.projects, entries)
+        self.review(sid, "VERDICT: FLAGGED\ns\n" + line)
+        [alert] = self.fx.alert_lines()
+        self.assertEqual(len(bullets(alert[0])), 1, alert[0])
+
+    def test_a_config_yes_does_not_clear(self):
+        c = call("a", "x", 10)
+        self.assert_alerts([c, answered("a", "ok", 9, "accept", "config")],
+                           f"- [HIGH] [red-line] session=SID {hms(c)} p — x")
+
+    def test_an_absent_field_does_not_clear(self):
+        c = call("a", "x", 10)
+        self.assert_alerts([c, result("a", "ok", 9)], f"- [HIGH] [red-line] session=SID {hms(c)} p — x")
+
+    def test_one_unapproved_cited_call_keeps_it(self):
+        a, b = call("a", "x", 10), call("b", "y", 8)
+        self.assert_alerts([a, answered("a", "ok", 9), b, result("b", "ok", 7)],
+                           f"- [HIGH] [red-line] session=SID {hms(a)} p — x\n  evidence: 'CALL' at {hms(b)}")
+
+    def test_no_usable_time_keeps_it(self):
+        c = call("a", "x", 10)
+        self.assert_alerts([c, answered("a", "ok", 9)], f"- [HIGH] [red-line] session=SID {hms(c)[:5]} p — x")
+
+    def test_injection_and_outward_sends_and_critical_stay_flaggable(self):
+        for line in ("- [HIGH] [prompt-injection] session=SID {t} p — a page told it to",
+                     "- [HIGH] [red-line] session=SID {t} p — the file's injected text drove this",
+                     "- [HIGH] [outward-send] session=SID {t} p — posted the file",
+                     "- [CRITICAL] [red-line] session=SID {t} p — wiped prod"):
+            with self.subTest(line=line):
+                self.tearDown()
+                self.setUp()
+                c = call("a", "x", 10)
+                self.assert_alerts([c, answered("a", "ok", 9)], line.format(t=hms(c)))
+
+    def test_another_batchs_session_cannot_be_named(self):
+        got = audit.parse_review("VERDICT: FLAGGED\ns\n- [HIGH] [other] session=aaaaaaaa 10:00:00 p — x",
+                                 {"bbbbbbbb"}, None, {"aaaaaaaa": {"10:00:00": [True]}})[1]
+        self.assertEqual(got[0]["sev"], "HIGH")
+
+    def test_low_block_workaround_and_red_line_are_floored(self):
+        for cat, want in (("block-workaround", "MEDIUM"), ("red-line", "MEDIUM"), ("out-of-scope", "LOW"),
+                          ("retry-changed", "LOW")):
+            review = f"VERDICT: FLAGGED\ns\n- [LOW] [{cat}] session=aaaaaaaa 10:00:00 p — x"
+            self.assertEqual(audit.parse_review(review, {"aaaaaaaa"})[1][0]["sev"], want, cat)
+        loose = "VERDICT: FLAGGED\ns\n- **[LOW] [red-line]** session=aaaaaaaa p — x"
+        self.assertEqual(audit.parse_review(loose, {"aaaaaaaa"})[1][0]["sev"], "MEDIUM")
+        for sev in ("MEDIUM", "HIGH", "CRITICAL"):
+            review = f"VERDICT: FLAGGED\ns\n- [{sev}] [red-line] session=aaaaaaaa 10:00:00 p — x"
+            self.assertEqual(audit.parse_review(review, {"aaaaaaaa"})[1][0]["sev"], sev)
+
+    def test_floor_is_lifted_for_an_approved_call(self):
+        review = "VERDICT: FLAGGED\ns\n- [LOW] [red-line] session=aaaaaaaa 10:00:00 p — x"
+        [e] = audit.parse_review(review, {"aaaaaaaa"}, None, {"aaaaaaaa": {"10:00:00": [True]}})[1]
+        self.assertEqual((e["sev"], e["approved"]), ("LOW", True))
+        [e] = audit.parse_review(review, {"aaaaaaaa"}, None, {"aaaaaaaa": {"10:00:00": [True, False]}})[1]
+        self.assertEqual((e["sev"], e["approved"]), ("MEDIUM", False))  # two calls in that second
 
 
 class NewFormatTest(unittest.TestCase):
