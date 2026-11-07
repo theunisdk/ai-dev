@@ -2793,14 +2793,55 @@ class DigestTest(unittest.TestCase):
         d = audit.build_digest("h", recs, start, now, [])
         self.assertLessEqual(len(d), audit.ALERT_LIMIT)  # one reason too long for Telegram
         self.assertIn(" …[+", d)
+        self.assertIn(" — report r.md", d)
 
     def test_a_flood_of_faults_never_reaches_the_hard_cut(self):
         recs, start, now = self.day(notes=[f"note {i} " + "n" * 280 for i in range(30)], alert="failed",
                                     failed_items=["f" * 5000] * 9, unparsed_items=2)
         d = audit.build_digest("h", recs, start, now, [])
         self.assertLessEqual(len(d), audit.ALERT_LIMIT)
-        self.assertIn("more in the reports", d)
+        self.assertLess(d.index("Alerts that failed to send:\n• fff"), d.index("note: note 0"))  # first
+        self.assertIn("faults not shown", d)
         self.assertNotIn("(cut; see the reports)", d)
+
+    def test_active_runs_without_a_tool_call_are_a_fault(self):
+        recs, start, now = self.day()
+        for r in recs:
+            r["calls"] = 0
+        self.assertIn("No tool calls in 24 active run(s)", audit.build_digest("h", recs, start, now, []))
+        recs[3]["calls"] = 2
+        self.assertIsNone(audit.build_digest("h", recs, start, now, []))
+        self.assertIsNone(audit.build_digest("h", self.day()[0], start, now, []))  # older records
+
+    def test_a_record_write_that_fails_reaches_the_digest(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        f = self.fx.audit / "digest.jsonl"
+        f.write_text(json.dumps({"t": (now - dt.timedelta(minutes=5)).isoformat(), "verdict": "CLEAN",
+                                 "sessions": 1, "calls": 1}) + "\n")
+        f.chmod(0o400)
+        write_session(self.fx.projects, [user("tidy")])
+        self.run_due(STUB_MODE="clean")
+        self.assertIn("note: this run's record was lost: could not write digest.jsonl", self.digests()[0])
+
+    def test_failed_state_writes_in_the_silent_path_are_logged(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        sd = self.fx.audit
+        (sd / "digest.jsonl").write_text(json.dumps(
+            {"t": (now - dt.timedelta(minutes=5)).isoformat(), "verdict": "CLEAN", "sessions": 1}) + "\n")
+        store = audit.DigestStore
+        keep = store.mark_sent, store.prune
+        store.mark_sent, store.prune = (lambda self, b: "state"), (lambda self, r: "prune")
+        try:
+            out = audit.send_digest(type("A", (), {"on_flag": []}), "h", sd, now, now.hour, audit.Redactor())
+        finally:
+            store.mark_sent, store.prune = keep
+        self.assertEqual(out[1:], ["DIGEST-STATE-FAILED state", "DIGEST-RECORD-FAILED prune"])
+
+    def test_a_future_last_run_is_noted_not_trusted(self):
+        (self.fx.audit / "last_run").write_text((dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=2)).isoformat())
+        write_session(self.fx.projects, [user("tidy", m=-0.1 + 0.5)])
+        self.run_due(STUB_MODE="clean")
+        self.assertIn("last_run is in the future", self.digests()[0])
 
     def test_a_lost_record_is_a_fault_at_digest_time(self):
         sd = self.fx.audit
@@ -2963,13 +3004,42 @@ class HumanApprovalTest(unittest.TestCase):
                                  {"bbbbbbbb"}, None, {"aaaaaaaa": {"10:00:00": [True]}})[1]
         self.assertEqual(got[0]["sev"], "HIGH")
 
+    def test_a_folded_or_unclear_finding_keeps_its_severity(self):
+        ok = {"aaaaaaaa": {"10:00:00": [True], "10:05:00": [False]}}
+        head = "VERDICT: FLAGGED\ns\n"
+        for text in ("- [HIGH] [red-line] session=aaaaaaaa 10:00:00 p — killed by pattern, again at 10:05",
+                     "- [HIGH] [red-line] session=aaaaaaaa 10:00:00 p — killed by pattern at 10:05 too",
+                     "- [HIGH] [red-line] session=aaaaaaaa 10:00:00 p — killed by pattern\n"
+                     "  evidence: CALL Bash: pkill -f foo; CALL Bash: pkill -f bar",
+                     "- [HIGH] [red-line] session=aaaaaaaa p — killed by pattern\n\nNote: 10:00:00 was approved",
+                     "- **[HIGH]** outward send session=aaaaaaaa 10:00:00 p — posted it",
+                     "1. [HIGH] outward send session=aaaaaaaa 10:00:00 p — posted it",
+                     "- [HIGH] [exfiltration] session=aaaaaaaa 10:00:00 p — posted it",
+                     "- [HIGH] [other] session=aaaaaaaa 10:00:00 p — the web page told it to run this"):
+            with self.subTest(text=text):
+                [e] = audit.parse_review(head + text, {"aaaaaaaa"}, None, ok)[1]
+                self.assertEqual((e["sev"], e["approved"]), ("HIGH", False))
+        clear = "- [HIGH] [red-line] session=aaaaaaaa 10:00:00 p — ran against a box\n  evidence: CALL Bash: pkill x"
+        self.assertTrue(audit.parse_review(head + clear, {"aaaaaaaa"}, None, ok)[1][0]["approved"])
+
+    def test_a_risky_pattern_past_the_cut_is_tagged(self):
+        write_session(self.fx.projects, [call("a", "echo hi; " + "x " * 1000 + "git push --force"),
+                                         result("a", "ok")])
+        self.fx.run("--since", "1h", STUB_MODE="clean")
+        self.assertRegex(self.timeline(), r"CALL Bash \[RISKY\]: ")
+
     def test_low_block_workaround_and_red_line_are_floored(self):
         for cat, want in (("block-workaround", "MEDIUM"), ("red-line", "MEDIUM"), ("out-of-scope", "LOW"),
                           ("retry-changed", "LOW")):
             review = f"VERDICT: FLAGGED\ns\n- [LOW] [{cat}] session=aaaaaaaa 10:00:00 p — x"
             self.assertEqual(audit.parse_review(review, {"aaaaaaaa"})[1][0]["sev"], want, cat)
-        loose = "VERDICT: FLAGGED\ns\n- **[LOW] [red-line]** session=aaaaaaaa p — x"
-        self.assertEqual(audit.parse_review(loose, {"aaaaaaaa"})[1][0]["sev"], "MEDIUM")
+        for text in ("- **[LOW] [red-line]** session=aaaaaaaa p — x", "- [LOW] red-line session=aaaaaaaa p — x",
+                     "- [LOW] [redline] session=aaaaaaaa p — x", "- [LOW] [red line] session=aaaaaaaa p — x",
+                     "- [LOW] [block_workaround] session=aaaaaaaa p — x"):
+            [e] = audit.parse_review("VERDICT: FLAGGED\ns\n" + text, {"aaaaaaaa"})[1]
+            self.assertEqual(e["sev"], "MEDIUM", text)
+        prose = "VERDICT: FLAGGED\ns\n- [LOW] [out-of-scope] session=aaaaaaaa p — not a red line"
+        self.assertEqual(audit.parse_review(prose, {"aaaaaaaa"})[1][0]["sev"], "LOW")
         for sev in ("MEDIUM", "HIGH", "CRITICAL"):
             review = f"VERDICT: FLAGGED\ns\n- [{sev}] [red-line] session=aaaaaaaa 10:00:00 p — x"
             self.assertEqual(audit.parse_review(review, {"aaaaaaaa"})[1][0]["sev"], sev)
