@@ -2804,6 +2804,35 @@ class DigestTest(unittest.TestCase):
         self.assertIn("faults not shown", d)
         self.assertNotIn("(cut; see the reports)", d)
 
+    def test_a_long_fault_costs_only_itself(self):
+        self.assertEqual(audit.fit_lines(["a" * 100, "b" * 50, "c"], 60, "x"), ["b" * 50, "c", "• +1 more x"])
+        recs, start, now = self.day(
+            problems=[{"kind": "BATCH-FAILED", "text": "boom " * 100}, {"kind": "FILE-SKIPPED", "text": "skip " * 100}],
+            notes=["last_run is in the future"], alert="failed", unparsed_items=3,
+            failed_items=[f"item {i} " + "f" * 500 for i in range(7)])
+        d = audit.build_digest("h", recs, start, now, [])
+        self.assertLessEqual(len(d), audit.ALERT_LIMIT)
+        for want in ("Problem BATCH-FAILED", "Problem FILE-SKIPPED", "note: last_run is in the future",
+                     "Unparsed list lines"):
+            self.assertIn(want, d)
+        self.assertNotIn("faults not shown", d)
+
+    def test_a_repeated_failed_alert_cannot_hide_a_new_one(self):
+        now = utc("2026-11-03T05:00:00")
+        start = now - dt.timedelta(hours=24)
+        same = "Review incomplete, BATCH-FAILED: batch 1 of 1 failed (the window is retried next run)"
+        recs = [{"_t": start + dt.timedelta(hours=h), "verdict": "CLEAN", "sessions": 1, "alert": "failed",
+                 "failed_items": [same] + (["HIGH [red-line]: force-pushed main — repo, session aaaaaaaa"]
+                                           if h == 24 else [])} for h in range(1, 25)]
+        d = audit.build_digest("h", recs, start, now, [])
+        self.assertEqual(d.count("BATCH-FAILED"), 1)
+        self.assertIn("HIGH [red-line]: force-pushed main", d)
+        self.assertNotIn("more in the reports", d)
+        recs[-1]["failed_items"] = [f"item {i}" for i in range(7)]
+        d = audit.build_digest("h", recs, start, now, [])
+        self.assertLess(d.index("item 0"), d.index("item 4"))  # the newest run first
+        self.assertIn("• +3 more in the reports", d)
+
     def test_active_runs_without_a_tool_call_are_a_fault(self):
         recs, start, now = self.day()
         for r in recs:
@@ -2916,7 +2945,7 @@ class HumanApprovalTest(unittest.TestCase):
                          ({"decision": "reject", "source": "user_reject"}, "no"),
                          ({"decision": "accept", "source": "config", "reasonType": "classifier"}, None),
                          ({"decision": "accept", "source": "hook"}, None),
-                         ({"decision": "accept", "source": "user_permanent"}, None),
+                         ({"decision": "accept", "source": "user_permanent"}, "yes"),
                          ({"decision": "reject", "source": "config"}, None),
                          ({}, None), (None, None), ("accept", None)):
             self.assertEqual(audit.human_decision(pd, one), want, pd)
@@ -3028,7 +3057,8 @@ class HumanApprovalTest(unittest.TestCase):
                 [e] = audit.parse_review(head + text, {"aaaaaaaa"}, None, ok)[1]
                 self.assertEqual((e["sev"], e["approved"]), ("MEDIUM", False))
         clear = "- [MEDIUM] [red-line] session=aaaaaaaa 10:00:00 p — ran against a box\n  evidence: CALL Bash: pkill x"
-        self.assertTrue(audit.parse_review(head + clear, {"aaaaaaaa"}, None, ok)[1][0]["approved"])
+        [e] = audit.parse_review(head + clear, {"aaaaaaaa"}, None, ok)[1]
+        self.assertEqual((e["sev"], e["approved"]), ("LOW", True))
 
     def test_a_risky_pattern_past_the_cut_is_tagged(self):
         write_session(self.fx.projects, [call("a", "echo hi; " + "x " * 1000 + "git push --force"),

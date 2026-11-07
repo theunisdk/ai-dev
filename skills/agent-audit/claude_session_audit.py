@@ -40,8 +40,8 @@ thing: the secret's type, placeholder, sink, project and session, or the finding
 one-liner, project and session. A model finding whose session and category already
 alerted in the last day (at the same or a higher severity) is marked REPEAT in the
 report and doesn't count; CRITICAL findings and verdicts always count. A call a person
-approved at a permission prompt is sanctioned: a MEDIUM finding that only cites such
-calls drops to LOW, unless it is about injected content or an outward send. Other
+approved at a permission prompt is sanctioned: a MEDIUM or LOW finding that only cites
+such calls ends at LOW, unless it is about injected content or an outward send. Other
 block-workaround and red-line findings are at least MEDIUM. HIGH and CRITICAL stay.
 MEDIUM findings and problems that already alerted go into one daily digest, sent through
 the same commands by the first scheduled run at or after 05:00 UTC (--digest-hour), and
@@ -1372,7 +1372,7 @@ def human_decision(pd, content):
     results = sum(isinstance(c, dict) and c.get("type") == "tool_result" for c in content)
     if results != 1 or not isinstance(pd, dict):
         return None
-    if pd.get("decision") == "accept" and pd.get("source") == "user_temporary":
+    if pd.get("decision") == "accept" and pd.get("source") in ("user_temporary", "user_permanent"):
         return "yes"
     if pd.get("decision") == "reject" and pd.get("source") == "user_reject":
         return "no"
@@ -1930,9 +1930,9 @@ def parse_review(review, known=(), memory=None, approved=None):
     carrying session=<8 hex>, or an indented line carrying both session= and a stated
     severity ("(high)", "High:", "HIGH"); other lines are evidence or prose. Only a
     bracketed entry for a session in known gets a dedupe key. approved maps a session to
-    {HH:MM:SS: [was that call or result human-approved, ...]}: a finding only about those
-    calls drops to LOW, and otherwise a block-workaround or red-line finding is at least
-    MEDIUM. Returns (the review with repeats marked, entries, the model's summary line, the
+    {HH:MM:SS: [was that call or result human-approved, ...]}: a MEDIUM or LOW finding only
+    about those calls ends at LOW, HIGH and CRITICAL stay, and any other block-workaround
+    or red-line finding is at least MEDIUM. Returns (the review with repeats marked, entries, the model's summary line, the
     number of list items at any indent that are not entries). Each entry: sev (None when no
     known severity can be read), cat, sess, key, repeat, approved, line."""
     lines = review.splitlines()
@@ -2343,12 +2343,12 @@ class DigestStore:
 
 
 def fit_lines(lines, room, where):
-    """As many lines as fit in room, whole, and a count of the rest. A first line longer
-    than all of room is the one thing cut."""
+    """Every line that fits in room, whole, and a count of the rest, so a long line costs
+    only itself. A lone line longer than all of room is the one thing cut."""
     kept = []
     for line in lines:
         if len(line) + 1 > room:
-            break
+            continue
         kept.append(line)
         room -= len(line) + 1
     if not kept and lines and room > 200:
@@ -2403,7 +2403,7 @@ def build_digest(host, records, start, now, notes, first=False):
     # Beside fresh findings a plain list line is chatter; with only repeats it may be a
     # fresh finding the parsers missed.
     hidden_items = sum(r.get("unparsed_beside_repeats") or 0 for r in runs)
-    failed_items = [i for r in runs for i in r.get("failed_items") or ()]
+    failed_items = list(dict.fromkeys(i for r in reversed(runs) for i in r.get("failed_items") or ()))
     run_notes = collections.Counter(n for r in runs for n in r.get("notes") or () if isinstance(n, str))
     notes = list(notes) + [n + (f" (×{c})" if c > 1 else "") for n, c in run_notes.items()]
     if any(r.get("ids_off") for r in runs):
@@ -2434,7 +2434,7 @@ def build_digest(host, records, start, now, notes, first=False):
                       + (f" (+{len(gaps) - 4})" if len(gaps) > 4 else ""))
     for kind, hits in sorted(problems.items()):
         t, text = hits[-1]
-        faults.append(f"Problem {kind} ×{len(hits)} (last {hm(t)}: {text})")
+        faults.append(f"Problem {kind} ×{len(hits)} (last {hm(t)}: {clip(text, NOTE_LIMIT)})")
     if send_failures:
         faults.append(f"This digest is late: {send_failures} earlier send(s) failed.")
     faults += [f"note: {n}" for n in notes]
