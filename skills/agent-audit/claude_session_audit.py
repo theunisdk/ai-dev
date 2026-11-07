@@ -40,9 +40,9 @@ thing: the secret's type, placeholder, sink, project and session, or the finding
 one-liner, project and session. A model finding whose session and category already
 alerted in the last day (at the same or a higher severity) is marked REPEAT in the
 report and doesn't count; CRITICAL findings and verdicts always count. A call a person
-approved at a permission prompt is sanctioned: a finding that only cites such calls
-drops to LOW, unless it is CRITICAL or about injected content or an outward send. Other
-block-workaround and red-line findings are at least MEDIUM.
+approved at a permission prompt is sanctioned: a MEDIUM finding that only cites such
+calls drops to LOW, unless it is about injected content or an outward send. Other
+block-workaround and red-line findings are at least MEDIUM. HIGH and CRITICAL stay.
 MEDIUM findings and problems that already alerted go into one daily digest, sent through
 the same commands by the first scheduled run at or after 05:00 UTC (--digest-hour), and
 that digest sends nothing at all when nothing is MEDIUM or above and the audit can vouch
@@ -1911,10 +1911,11 @@ def human_cleared(sev, cat, line, scope, session):
     """Whether a finding is only about calls a person approved. Its line must cite a time;
     every HH:MM:SS in its line and the lines under it must be a call or result in that
     session, all human-approved; and it may quote no more calls than it cites times. A bare
-    HH:MM, a CRITICAL, an unknown category, or a category or wording of injection, an
-    outward send or a repeat keeps it: the model's words can be steered by what it read,
-    and one entry can fold several calls."""
-    if (sev not in SEVERITIES or sev == "CRITICAL" or cat not in CATEGORIES or cat in NEVER_REPEAT
+    HH:MM, an unknown category, or a category or wording of injection, an outward send or
+    a repeat keeps it. HIGH and CRITICAL always stay: the reviewer knew the call was approved
+    and flagged it anyway, one entry can fold several calls, and its words can be steered
+    by what it read, so a wrong clearance must never silence an alert."""
+    if (sev not in ("MEDIUM", "LOW") or cat not in CATEGORIES or cat in NEVER_REPEAT
             or UNCLEARABLE_RE.search(scope) or LOOSE_TIME_RE.search(scope)
             or not CITED_TIME_RE.search(line)):
         return False

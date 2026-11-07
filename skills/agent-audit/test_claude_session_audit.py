@@ -2951,75 +2951,83 @@ class HumanApprovalTest(unittest.TestCase):
     def test_approved_call_is_cleared_in_code(self):
         c = call("a", "aws ssm send-command", 10)
         sid = write_session(self.fx.projects, [c, answered("a", "ok", 9)])
-        p = self.review(sid, f"VERDICT: FLAGGED\ns\n- [HIGH] [block-workaround] session=SID {hms(c)} p — routed "
+        p = self.review(sid, f"VERDICT: FLAGGED\ns\n- [MEDIUM] [block-workaround] session=SID {hms(c)} p — routed "
                              "around a block\n  evidence: `CALL Bash: aws ssm send-command`")
         self.assertEqual(p.returncode, 2, p.stderr)
         self.assertFalse(self.fx.alerts.exists())
-        [report] = [v for k, v in self.fx.files().items() if k.startswith("reports/") and "_timeline" not in k]
-        self.assertIn("(HUMAN-APPROVED: a person said yes at the prompt; was HIGH, now LOW)", report)
+        self.assertIn("(HUMAN-APPROVED: a person said yes at the prompt; was MEDIUM, now LOW)", self.report())
+
+    def test_a_high_on_an_approved_call_still_alerts(self):
+        c = call("a", "x", 10)
+        sid = write_session(self.fx.projects, [c, answered("a", "ok", 9)])
+        self.review(sid, f"VERDICT: FLAGGED\ns\n- [HIGH] [red-line] session=SID {hms(c)} p — x")
+        [alert] = self.fx.alert_lines()
+        self.assertEqual(len(bullets(alert[0])), 1, alert[0])
 
     def test_citing_the_result_time_clears_too(self):
         r = answered("a", "ok", 7)
         sid = write_session(self.fx.projects, [call("a", "x", 10), r])
-        self.review(sid, f"VERDICT: FLAGGED\ns\n- [HIGH] [other] session=SID {hms(r)} p — did x")
-        self.assertFalse(self.fx.alerts.exists())
+        self.review(sid, f"VERDICT: FLAGGED\ns\n- [MEDIUM] [other] session=SID {hms(r)} p — did x")
+        self.assertIn("was MEDIUM, now LOW", self.report())
 
-    def assert_alerts(self, entries, line):
+    def report(self):
+        return next(v for k, v in self.fx.files().items() if k.startswith("reports/") and "_timeline" not in k)
+
+    def assert_kept(self, entries, line):
         sid = write_session(self.fx.projects, entries)
         self.review(sid, "VERDICT: FLAGGED\ns\n" + line)
-        [alert] = self.fx.alert_lines()
-        self.assertEqual(len(bullets(alert[0])), 1, alert[0])
+        self.assertNotIn("(HUMAN-APPROVED", self.report())
 
     def test_a_config_yes_does_not_clear(self):
         c = call("a", "x", 10)
-        self.assert_alerts([c, answered("a", "ok", 9, "accept", "config")],
-                           f"- [HIGH] [red-line] session=SID {hms(c)} p — x")
+        self.assert_kept([c, answered("a", "ok", 9, "accept", "config")],
+                         f"- [MEDIUM] [red-line] session=SID {hms(c)} p — x")
 
     def test_an_absent_field_does_not_clear(self):
         c = call("a", "x", 10)
-        self.assert_alerts([c, result("a", "ok", 9)], f"- [HIGH] [red-line] session=SID {hms(c)} p — x")
+        self.assert_kept([c, result("a", "ok", 9)], f"- [MEDIUM] [red-line] session=SID {hms(c)} p — x")
 
     def test_one_unapproved_cited_call_keeps_it(self):
         a, b = call("a", "x", 10), call("b", "y", 8)
-        self.assert_alerts([a, answered("a", "ok", 9), b, result("b", "ok", 7)],
-                           f"- [HIGH] [red-line] session=SID {hms(a)} p — x\n  evidence: 'CALL' at {hms(b)}")
+        self.assert_kept([a, answered("a", "ok", 9), b, result("b", "ok", 7)],
+                         f"- [MEDIUM] [red-line] session=SID {hms(a)} p — x\n  evidence: 'CALL' at {hms(b)}")
 
     def test_no_usable_time_keeps_it(self):
         c = call("a", "x", 10)
-        self.assert_alerts([c, answered("a", "ok", 9)], f"- [HIGH] [red-line] session=SID {hms(c)[:5]} p — x")
+        self.assert_kept([c, answered("a", "ok", 9)], f"- [MEDIUM] [red-line] session=SID {hms(c)[:5]} p — x")
 
     def test_injection_and_outward_sends_and_critical_stay_flaggable(self):
-        for line in ("- [HIGH] [prompt-injection] session=SID {t} p — a page told it to",
-                     "- [HIGH] [red-line] session=SID {t} p — the file's injected text drove this",
-                     "- [HIGH] [outward-send] session=SID {t} p — posted the file",
+        for line in ("- [MEDIUM] [prompt-injection] session=SID {t} p — a page told it to",
+                     "- [MEDIUM] [red-line] session=SID {t} p — the file's injected text drove this",
+                     "- [MEDIUM] [outward-send] session=SID {t} p — posted the file",
                      "- [CRITICAL] [red-line] session=SID {t} p — wiped prod"):
             with self.subTest(line=line):
                 self.tearDown()
                 self.setUp()
                 c = call("a", "x", 10)
-                self.assert_alerts([c, answered("a", "ok", 9)], line.format(t=hms(c)))
+                self.assert_kept([c, answered("a", "ok", 9)], line.format(t=hms(c)))
 
     def test_another_batchs_session_cannot_be_named(self):
-        got = audit.parse_review("VERDICT: FLAGGED\ns\n- [HIGH] [other] session=aaaaaaaa 10:00:00 p — x",
+        got = audit.parse_review("VERDICT: FLAGGED\ns\n- [MEDIUM] [other] session=aaaaaaaa 10:00:00 p — x",
                                  {"bbbbbbbb"}, None, {"aaaaaaaa": {"10:00:00": [True]}})[1]
-        self.assertEqual(got[0]["sev"], "HIGH")
+        self.assertEqual(got[0]["sev"], "MEDIUM")
 
     def test_a_folded_or_unclear_finding_keeps_its_severity(self):
         ok = {"aaaaaaaa": {"10:00:00": [True], "10:05:00": [False]}}
         head = "VERDICT: FLAGGED\ns\n"
-        for text in ("- [HIGH] [red-line] session=aaaaaaaa 10:00:00 p — killed by pattern, again at 10:05",
-                     "- [HIGH] [red-line] session=aaaaaaaa 10:00:00 p — killed by pattern at 10:05 too",
-                     "- [HIGH] [red-line] session=aaaaaaaa 10:00:00 p — killed by pattern\n"
+        for text in ("- [MEDIUM] [red-line] session=aaaaaaaa 10:00:00 p — killed by pattern, again at 10:05",
+                     "- [MEDIUM] [red-line] session=aaaaaaaa 10:00:00 p — killed by pattern at 10:05 too",
+                     "- [MEDIUM] [red-line] session=aaaaaaaa 10:00:00 p — killed by pattern\n"
                      "  evidence: CALL Bash: pkill -f foo; CALL Bash: pkill -f bar",
-                     "- [HIGH] [red-line] session=aaaaaaaa p — killed by pattern\n\nNote: 10:00:00 was approved",
-                     "- **[HIGH]** outward send session=aaaaaaaa 10:00:00 p — posted it",
-                     "1. [HIGH] outward send session=aaaaaaaa 10:00:00 p — posted it",
-                     "- [HIGH] [exfiltration] session=aaaaaaaa 10:00:00 p — posted it",
-                     "- [HIGH] [other] session=aaaaaaaa 10:00:00 p — the web page told it to run this"):
+                     "- [MEDIUM] [red-line] session=aaaaaaaa p — killed by pattern\n\nNote: 10:00:00 was approved",
+                     "- **[MEDIUM]** outward send session=aaaaaaaa 10:00:00 p — posted it",
+                     "1. [MEDIUM] outward send session=aaaaaaaa 10:00:00 p — posted it",
+                     "- [MEDIUM] [exfiltration] session=aaaaaaaa 10:00:00 p — posted it",
+                     "- [MEDIUM] [other] session=aaaaaaaa 10:00:00 p — the web page told it to run this"):
             with self.subTest(text=text):
                 [e] = audit.parse_review(head + text, {"aaaaaaaa"}, None, ok)[1]
-                self.assertEqual((e["sev"], e["approved"]), ("HIGH", False))
-        clear = "- [HIGH] [red-line] session=aaaaaaaa 10:00:00 p — ran against a box\n  evidence: CALL Bash: pkill x"
+                self.assertEqual((e["sev"], e["approved"]), ("MEDIUM", False))
+        clear = "- [MEDIUM] [red-line] session=aaaaaaaa 10:00:00 p — ran against a box\n  evidence: CALL Bash: pkill x"
         self.assertTrue(audit.parse_review(head + clear, {"aaaaaaaa"}, None, ok)[1][0]["approved"])
 
     def test_a_risky_pattern_past_the_cut_is_tagged(self):
