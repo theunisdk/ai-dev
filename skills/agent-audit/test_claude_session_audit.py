@@ -2817,6 +2817,41 @@ class DigestTest(unittest.TestCase):
             self.assertIn(want, d)
         self.assertNotIn("faults not shown", d)
 
+    def test_fit_lines_boundaries(self):
+        fit = lambda lines, room: audit.fit_lines(lines, room, "x")
+        self.assertEqual(fit(["aaa", "b", "c"], 6), ["aaa", "b", "• +1 more x"])  # newlines count
+        self.assertEqual(fit(["aaaa"], 5), ["aaaa"])
+        self.assertEqual(fit(["aaaa"], 4), ["• +1 more x"])  # no room to cut in
+        self.assertEqual(fit([], 5), [])
+        self.assertEqual(fit(["a" * 300], 200), ["• +1 more x"])
+        [cut] = fit(["a" * 300], 201)
+        self.assertTrue(cut.startswith("aaa") and " …[+" in cut and len(cut) <= 201, cut)
+
+    def test_fit_lines_keeps_a_group_together_and_the_first_finding(self):
+        fit = lambda lines, room: audit.fit_lines(lines, room, "x")
+        self.assertEqual(fit(["• a " + "x" * 300, "  also y", "• b"], 100), ["• b", "• +2 more x"])
+        self.assertEqual(fit(["• a", "  also " + "y" * 300, "• b"], 100), ["• a", "• b", "• +1 more x"])
+        first, second, more = fit(["a" * 500, "z" * 10, "  also q" + "w" * 500], 300)
+        self.assertTrue(first.startswith("aaa") and " …[+" in first and len(first) <= 288, first)
+        self.assertEqual((second, more), ("z" * 10, "• +1 more x"))
+
+    def test_a_long_newest_finding_stays_in_the_digest_with_its_report(self):
+        recs, start, now = self.day(report="r.md", findings=[
+            {"sev": "MEDIUM", "cat": "red-line", "sess": "aaaaaaaa", "text": "x" * 4000}])
+        recs[-2].update(report="old.md", findings=[
+            {"sev": "MEDIUM", "cat": "red-line", "sess": "bbbbbbbb", "text": "minor second"}])
+        d = audit.build_digest("h", recs, start, now, [])
+        self.assertLessEqual(len(d), audit.ALERT_LIMIT)
+        self.assertRegex(d, r"• red-line ×2: MEDIUM \(\?, s aaaaaaaa\): x+ …\[\+\d+ chars\] — report r\.md")
+        self.assertIn("• +1 more in the reports", d)  # its "also" line goes with it, never alone
+        self.assertNotIn("  also", d)
+
+    def test_a_corrupt_failed_item_is_skipped(self):
+        recs, start, now = self.day(alert="failed", failed_items=[{"x": 1}, "real item"])
+        d = audit.build_digest("h", recs, start, now, [])
+        self.assertIn("• real item", d)
+        self.assertNotIn('{"x"', d)
+
     def test_a_repeated_failed_alert_cannot_hide_a_new_one(self):
         now = utc("2026-11-03T05:00:00")
         start = now - dt.timedelta(hours=24)

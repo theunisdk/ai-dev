@@ -2344,15 +2344,16 @@ class DigestStore:
 
 def fit_lines(lines, room, where):
     """Every line that fits in room, whole, and a count of the rest, so a long line costs
-    only itself. A lone line longer than all of room is the one thing cut."""
-    kept = []
+    only itself and any indented lines under it. A first line that didn't fit is cut to
+    the room left: it is the one thing cut."""
+    kept, dropped = [], False
     for line in lines:
-        if len(line) + 1 > room:
-            continue
-        kept.append(line)
-        room -= len(line) + 1
-    if not kept and lines and room > 200:
-        kept = [clip_keeping_tail(lines[0], room, clip)]
+        dropped = len(line) + 1 > room or (dropped and line.startswith("  "))
+        if not dropped:
+            kept.append(line)
+            room -= len(line) + 1
+    if lines and kept[:1] != lines[:1] and room > 200:
+        kept.insert(0, clip_keeping_tail(lines[0], room - 1, clip))
     rest = len(lines) - len(kept)
     return kept + ([f"• +{rest} more {where}"] if rest else [])
 
@@ -2360,8 +2361,8 @@ def fit_lines(lines, room, where):
 def build_digest(host, records, start, now, notes, first=False):
     """The daily digest text from the run records after start, or None when it has nothing
     to say: nothing MEDIUM or above and no fault, so the audit can vouch for the window.
-    Faults come first, so the length cap can only cost findings. Placeholders, fixed labels
-    and redacted text only."""
+    Faults come first, so the length cap costs findings first, and a fault left out is
+    counted. Placeholders, fixed labels and redacted text only."""
     hm = lambda t: t.astimezone(dt.timezone.utc).strftime("%H:%M")
     recs = [r for r in records or () if start < r["_t"] <= now]
     runs = [r for r in recs if "verdict" in r]
@@ -2403,7 +2404,8 @@ def build_digest(host, records, start, now, notes, first=False):
     # Beside fresh findings a plain list line is chatter; with only repeats it may be a
     # fresh finding the parsers missed.
     hidden_items = sum(r.get("unparsed_beside_repeats") or 0 for r in runs)
-    failed_items = list(dict.fromkeys(i for r in reversed(runs) for i in r.get("failed_items") or ()))
+    failed_items = list(dict.fromkeys(i for r in reversed(runs) for i in r.get("failed_items") or ()
+                                  if isinstance(i, str)))
     run_notes = collections.Counter(n for r in runs for n in r.get("notes") or () if isinstance(n, str))
     notes = list(notes) + [n + (f" (×{c})" if c > 1 else "") for n, c in run_notes.items()]
     if any(r.get("ids_off") for r in runs):
