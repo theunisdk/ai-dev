@@ -1883,8 +1883,8 @@ FINDING_LINE_RE = re.compile(r"[ \t]*[-*][ \t]*\[[ \t]*([A-Za-z]+)[ \t]*\]"
 FINDING_SESSION_RE = re.compile(r"\bsession[ \t]*[=:]?[ \t]*([0-9a-f]{8})", re.I)
 SESSION_TAG_RE = re.compile(r"\bsession[ \t]*=[ \t]*[0-9a-f]{8}", re.I)
 LIST_ITEM_RE = re.compile(r"[ \t]*(?:[-*•+]|\d+[.)])[ \t]")
-# An indented why: line belongs to the entry above it, whatever severity words it weighs,
-# unless it names a session of its own.
+# An indented why: line belongs to the entry above it unless it names another session; a
+# severity written loosely on it still raises that entry.
 WHY_LINE_RE = re.compile(r"[ \t]+(?:[-*•+][ \t]+)?[*_`]*why[*_`]*[ \t]*:", re.I)
 # The model's session= and [category] are its own words, which the timeline can steer.
 NEVER_REPEAT = ("prompt-injection", "outward-send")
@@ -1900,18 +1900,25 @@ REPEAT_MARK = (" (REPEAT: this session and category already alerted in the last 
 APPROVED_MARK = " (HUMAN-APPROVED: a person said yes at the prompt; was {}, now LOW)"
 
 
-def finding_start(line):
-    """(sev, cat, bracketed) when the line starts a finding entry, else None."""
-    if WHY_LINE_RE.match(line) and not FINDING_SESSION_RE.search(line):
-        return None
+def raised(sev, loose):
+    """sev, raised to a loosely written severity that is higher (or urgent, when sev is None)."""
+    if loose and (SEVERITIES.index(loose) < SEVERITIES.index(sev) if sev else loose in URGENT):
+        return loose
+    return sev
+
+
+def finding_start(line, open_sess=None):
+    """(sev, cat, bracketed) when the line starts a finding entry, else None. open_sess is
+    the session of the entry above, which a why: line naming it stays part of."""
+    if WHY_LINE_RE.match(line):
+        sm = FINDING_SESSION_RE.search(line)
+        if not sm or sm.group(1).lower() == open_sess:
+            return None
     m = FINDING_LINE_RE.fullmatch(line)
     if m:
         label = m.group(1).upper()
         sev = label if label in SEVERITIES else None
-        loose = loose_severity(m.group(3))
-        if loose and (SEVERITIES.index(loose) < SEVERITIES.index(sev) if sev else loose in URGENT):
-            sev = loose
-        return sev, (m.group(2) or "").lower(), True
+        return raised(sev, loose_severity(m.group(3))), (m.group(2) or "").lower(), True
     if loose_severity(line) or (SESSION_TAG_RE.search(line) and (
             LIST_ITEM_RE.match(line) or line[:1] in (" ", "\t") and tagged_severity(line))):
         return tagged_severity(line), "", False
@@ -1955,7 +1962,7 @@ def parse_review(review, known=(), memory=None, approved=None):
         if i == first and verdict_of(line) != "UNCLEAR":
             report.append(line)
             continue
-        start = finding_start(line)
+        start = finding_start(line, entries[-1]["sess"] if entries else None)
         if start is None:
             plain += LIST_ITEM_RE.match(line) is not None and not WHY_LINE_RE.match(line)
             report.append(line)
@@ -1963,7 +1970,9 @@ def parse_review(review, known=(), memory=None, approved=None):
         sev, cat, bracketed = start
         sm = FINDING_SESSION_RE.search(line)
         sess = sm.group(1).lower() if sm else None
-        under = next((j for j in range(i + 1, len(lines)) if finding_start(lines[j])), len(lines))
+        under = next((j for j in range(i + 1, len(lines)) if finding_start(lines[j], sess)), len(lines))
+        for why in filter(WHY_LINE_RE.match, lines[i + 1:under]):
+            sev = raised(sev, loose_severity(why))
         cleared = sess in known and human_cleared(sev, cat, line, "\n".join(lines[i:under]),
                                                   (approved or {}).get(sess, {}))
         mark = ""
@@ -2014,6 +2023,8 @@ def cut_words(text, n):
 
 def short_note(text):
     """One line of at most NOTE_CHARS. An older record's " …[+N chars]" becomes a plain "…"."""
+    if not isinstance(text, str):
+        return "?"
     return cut_words(re.sub(r"[ \t]*…\[\+\d+ chars\]", "…", one_line(text)), NOTE_CHARS)
 
 
@@ -2484,7 +2495,7 @@ def build_digest(host, records, start, now, notes, first=False):
         finding_lines = []
         for cat, items in sorted(by_cat.items(), key=lambda kv: (-len(kv[1]), kv[0])):
             for _, f, rep in sorted(items, key=lambda x: x[0], reverse=True):
-                repo = re.sub(r"^(\S+) \((\S+)\)$", r"\1/\2", f.get("repo") or "")
+                repo = re.sub(r"^(\S+) \((\S+)\)$", r"\1/\2", f["repo"] if isinstance(f.get("repo"), str) else "")
                 finding_lines.append("• " + clip_keeping_tail(
                     f"{f['sev']} {cat}" + (f", {repo}" if repo else "") + f": {short_note(f.get('text') or '?')}"
                     + (f" — {rep}" if rep else ""), LINE_CHARS))

@@ -2324,8 +2324,9 @@ class ReviewParseTest(unittest.TestCase):
 
     def test_the_why_line_belongs_to_its_entry(self):
         base = "VERDICT: FLAGGED\ns\n- [MEDIUM] [block-workaround] session=aaaaaaaa 12:00:01 p — reran it\n"
-        for why in ("  why: Severity: HIGH if the PM had not asked; [LOW] otherwise",
-                    "  - why: the cost is high (high) but it was asked for", "  **why:** CRITICAL — no"):
+        for why in ("  why: the PM asked; severity would be high (high) if not",
+                    "  - why: the cost is high but it was asked for", "  **why:** CRITICAL — no",
+                    "  why: session=aaaaaaaa was asked by the PM, so LOW at most"):
             with self.subTest(why=why):
                 review = base + why + "\n  evidence: 12:00:01 CALL Bash\n"
                 report, entries, _, plain = audit.parse_review(review, {"aaaaaaaa"})
@@ -2337,11 +2338,22 @@ class ReviewParseTest(unittest.TestCase):
                 self.assertFalse(audit.batch_alerts("FLAGGED", review))
         nested = base + "  why: session=bbbbbbbb force-pushed main (high)\n"
         self.assertEqual([e["sev"] for e in audit.parse_review(nested)[1]], ["MEDIUM", "HIGH"])
+        for why, want in (("  why: Severity: CRITICAL, it sent the key to a pastebin", "CRITICAL"),
+                          ("  why: [HIGH] it wrote to prod config", "HIGH"), ("  why: | HIGH | x", "HIGH")):
+            with self.subTest(why=why):  # a stated severity on the why: line still raises the entry
+                review = base + why + "\n"
+                self.assertEqual([e["sev"] for e in audit.parse_review(review, {"aaaaaaaa"})[1]], [want])
+                self.assertTrue(audit.batch_alerts("FLAGGED", review, {"aaaaaaaa"}))
         approved = {"aaaaaaaa": {"12:00:01": [True, True]}}
         line = "- [MEDIUM] [other] session=aaaaaaaa 12:00:01 p — reran it\n  evidence: 12:00:01 CALL Bash\n"
         self.assertEqual(audit.parse_review(line, {"aaaaaaaa"}, approved=approved)[1][0]["sev"], "LOW")
         repeat = line + "  why: it did this again after the prompt\n"
         self.assertEqual(audit.parse_review(repeat, {"aaaaaaaa"}, approved=approved)[1][0]["sev"], "MEDIUM")
+        own = ("- [MEDIUM] [other] session=aaaaaaaa 12:00:01 p — edited it\n"
+               "  why: session=aaaaaaaa was asked by the PM, so LOW at most\n"
+               "  evidence: 12:00:01 CALL Edit; 12:05:00 CALL Bash\n")
+        [e] = audit.parse_review(own, {"aaaaaaaa"}, approved=approved)[1]  # the unapproved call keeps it
+        self.assertEqual((e["sev"], e["approved"]), ("MEDIUM", False))
 
     def test_severity_word_in_evidence_prose_is_not_a_finding(self):
         """Issue #59: a session= line's severity is the one it states, not a word in its prose."""
@@ -2885,6 +2897,13 @@ class DigestTest(unittest.TestCase):
         self.assertIn(f"\n• MEDIUM red-line: {'x' * (audit.NOTE_CHARS - 1)}… — r.md\n"
                       "• MEDIUM red-line: minor second — old.md", d)  # the newest first
         self.assertNotIn("aaaaaaaa", d)
+
+    def test_a_record_with_odd_field_types_still_builds(self):
+        recs, start, now = self.day(report="r.md", problems=[{"kind": "BATCH-FAILED", "text": 7}], findings=[
+            {"sev": "MEDIUM", "cat": "other", "sess": "aaaaaaaa", "repo": ["x"], "text": 5}])
+        d = audit.build_digest("h", recs, start, now, [])
+        self.assertIn("\n• MEDIUM other: ? — r.md", d)
+        self.assertIn("Problem BATCH-FAILED ×1 (last 05:00: ?)", d)
 
     def test_a_corrupt_failed_item_is_skipped(self):
         recs, start, now = self.day(alert="failed", failed_items=[{"x": 1}, "real item"])
