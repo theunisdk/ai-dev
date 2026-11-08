@@ -1972,7 +1972,7 @@ def parse_review(review, known=(), memory=None, approved=None):
         sess = sm.group(1).lower() if sm else None
         under = next((j for j in range(i + 1, len(lines)) if finding_start(lines[j], sess)), len(lines))
         for why in filter(WHY_LINE_RE.match, lines[i + 1:under]):
-            sev = raised(sev, loose_severity(why))
+            sev = raised(sev, (tagged_severity if FINDING_SESSION_RE.search(why) else loose_severity)(why))
         cleared = sess in known and human_cleared(sev, cat, line, "\n".join(lines[i:under]),
                                                   (approved or {}).get(sess, {}))
         mark = ""

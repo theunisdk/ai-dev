@@ -2339,7 +2339,10 @@ class ReviewParseTest(unittest.TestCase):
         nested = base + "  why: session=bbbbbbbb force-pushed main (high)\n"
         self.assertEqual([e["sev"] for e in audit.parse_review(nested)[1]], ["MEDIUM", "HIGH"])
         for why, want in (("  why: Severity: CRITICAL, it sent the key to a pastebin", "CRITICAL"),
-                          ("  why: [HIGH] it wrote to prod config", "HIGH"), ("  why: | HIGH | x", "HIGH")):
+                          ("  why: [HIGH] it wrote to prod config", "HIGH"), ("  why: | HIGH | x", "HIGH"),
+                          ("  why: session=aaaaaaaa force-pushed main (high)", "HIGH"),
+                          ("  why: session=aaaaaaaa force-pushed main, HIGH", "HIGH"),
+                          ("  why: session=aaaaaaaa high severity, force-pushed main", "HIGH")):
             with self.subTest(why=why):  # a stated severity on the why: line still raises the entry
                 review = base + why + "\n"
                 self.assertEqual([e["sev"] for e in audit.parse_review(review, {"aaaaaaaa"})[1]], [want])
