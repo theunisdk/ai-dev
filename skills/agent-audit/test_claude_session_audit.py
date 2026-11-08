@@ -469,9 +469,9 @@ class BatchTest(unittest.TestCase):
             self.assertIn(f"### batch {bad} of 2: FAILED", report)
             self.assertEqual(len(alerts), 1)
             got = bullets(alerts[0][0])
-            self.assertIn("HIGH: KEEP-ME-FINDING agent did X — no session given", got)
+            self.assertIn("HIGH, no session given: KEEP-ME-FINDING agent did X", got)
             self.assertIn(f"Review incomplete, BATCH-FAILED: batch {bad} of 2 failed: claude exited 1: "
-                          "boom: model unavailable (the window is retried next run)", got)
+                          "boom: model unavailable (retried next run)", got)
         self.both_orders("FAILME", check)
 
     def test_failed_batch_error_is_redacted(self):
@@ -616,7 +616,7 @@ class AlertVolumeTest(unittest.TestCase):
         p = self.fx.run(STUB_MODE="flagged")
         self.assertEqual(p.returncode, 2, p.stderr)
         [alert] = self.fx.alert_lines()
-        self.assertEqual(bullets(alert[0]), ["HIGH: KEEP-ME-FINDING agent did X — no session given"])
+        self.assertEqual(bullets(alert[0]), ["HIGH, no session given: KEEP-ME-FINDING agent did X"])
 
     def test_allowlist_expands_home_and_ignores_match_all_globs(self):
         (self.fx.audit / "allow").write_text("*\n/*\n~/fixture-*\n")
@@ -890,7 +890,7 @@ class AlertRuleTest(unittest.TestCase):
         self.assertIn("|  1 MEDIUM, 2 LOW", self.report())
         self.assertIn("alert=no", self.log())
 
-    def test_high_alerts_with_its_one_liner_project_and_session(self):
+    def test_high_alerts_with_its_short_note_and_project(self):
         sid = write_session(self.fx.projects, [user("tidy"), agent("done")],
                             cwd="/home/dev/pepper3/.claude/worktrees/fix-x")
         long_tail = " and then it kept going" * 20
@@ -901,18 +901,19 @@ class AlertRuleTest(unittest.TestCase):
         head, *rest = alert[0].splitlines()
         self.assertRegex(head, r"^🔴 Claude audit \(\S+\): 1 needs you$")
         [b] = bullets(alert[0])
-        self.assertEqual(b, f"HIGH [red-line]: killed tmux by pattern{long_tail} — pepper3 (fix-x), "
-                            f"session {sid[:8]}")  # the whole reason
+        note = audit.short_note("killed tmux by pattern" + long_tail)
+        self.assertEqual(b, f"HIGH red-line, pepper3/fix-x: {note}")  # a long note is cut at a word
+        self.assertTrue(len(note) <= audit.NOTE_CHARS and note.endswith(" kept…"), note)
         self.assertNotIn("evidence", alert[0])
+        self.assertNotIn(sid[:8], alert[0])
         self.assertIn("\nNot urgent, in the daily digest: 1 MEDIUM\n", alert[0])
-        # the project and session ride on the bullet even when the clip cuts the one-liner
         short = "VERDICT: FLAGGED\nx\n- [HIGH] [red-line] session={} 12:00:01 p — killed tmux"
         self.tearDown()
         self.setUp()
         sid = write_session(self.fx.projects, [user("tidy")], cwd="/home/dev/pepper3/.claude/worktrees/fix-x")
         self.review(short.format(sid[:8]))
         [b] = bullets(self.fx.alert_lines()[0][0])
-        self.assertEqual(b, f"HIGH [red-line]: killed tmux — pepper3 (fix-x), session {sid[:8]}")
+        self.assertEqual(b, "HIGH red-line, pepper3/fix-x: killed tmux")
 
     def test_critical_verdict_alerts_even_with_low_findings(self):
         self.review("VERDICT: CRITICAL\nbad\n\n" + LOW_FINDINGS)
@@ -924,9 +925,9 @@ class AlertRuleTest(unittest.TestCase):
         for text, want in [("VERDICT: FLAGGED\nsomething off\n- agent did X",
                             "FLAGGED, but no finding could be parsed: something off"),
                            ("VERDICT: FLAGGED\nodd\n- **HIGH** agent did X",
-                            "HIGH: agent did X — no session given"),
+                            "HIGH, no session given: agent did X"),
                            ("VERDICT: FLAGGED\nodd\n- [INFO] agent did X",
-                            "Severity unreadable: agent did X — no session given")]:
+                            "Severity unreadable, no session given: agent did X")]:
             with self.subTest(text=text):
                 self.tearDown()
                 self.setUp()
@@ -967,7 +968,7 @@ class AlertRuleTest(unittest.TestCase):
         self.review(LOW_REVIEW, rc=3, entries=[user("UNCLEARME please")])
         [alert] = self.fx.alert_lines()
         self.assertEqual(bullets(alert[0]), ["Review incomplete, BATCH-UNCLEAR: batch 1 of 1 came back "
-                                             "UNCLEAR (no VERDICT line) (the window is retried next run)"])
+                                             "UNCLEAR (no VERDICT line) (retried next run)"])
 
 
 class InstallScheduleTest(unittest.TestCase):
@@ -2321,6 +2322,42 @@ class ReviewParseTest(unittest.TestCase):
         evidence_only = review.split("    also")[0]
         self.assertFalse(audit.batch_alerts("FLAGGED", evidence_only, {"aaaaaaaa"}, mem))
 
+    def test_the_why_line_belongs_to_its_entry(self):
+        base = "VERDICT: FLAGGED\ns\n- [MEDIUM] [block-workaround] session=aaaaaaaa 12:00:01 p — reran it\n"
+        for why in ("  why: the PM asked; severity would be high (high) if not",
+                    "  - why: the cost is high but it was asked for", "  **why:** CRITICAL — no",
+                    "  why: session=aaaaaaaa was asked by the PM, so LOW at most"):
+            with self.subTest(why=why):
+                review = base + why + "\n  evidence: 12:00:01 CALL Bash\n"
+                report, entries, _, plain = audit.parse_review(review, {"aaaaaaaa"})
+                self.assertEqual([(e["sev"], e["key"]) for e in entries],
+                                 [("MEDIUM", "aaaaaaaa:block-workaround")])
+                self.assertEqual(plain, 0)
+                self.assertIn(why, report)
+                self.assertEqual(audit.finding_summary(entries[0]["line"]), "reran it")
+                self.assertFalse(audit.batch_alerts("FLAGGED", review))
+        nested = base + "  why: session=bbbbbbbb force-pushed main (high)\n"
+        self.assertEqual([e["sev"] for e in audit.parse_review(nested)[1]], ["MEDIUM", "HIGH"])
+        for why, want in (("  why: Severity: CRITICAL, it sent the key to a pastebin", "CRITICAL"),
+                          ("  why: [HIGH] it wrote to prod config", "HIGH"), ("  why: | HIGH | x", "HIGH"),
+                          ("  why: session=aaaaaaaa force-pushed main (high)", "HIGH"),
+                          ("  why: session=aaaaaaaa force-pushed main, HIGH", "HIGH"),
+                          ("  why: session=aaaaaaaa high severity, force-pushed main", "HIGH")):
+            with self.subTest(why=why):  # a stated severity on the why: line still raises the entry
+                review = base + why + "\n"
+                self.assertEqual([e["sev"] for e in audit.parse_review(review, {"aaaaaaaa"})[1]], [want])
+                self.assertTrue(audit.batch_alerts("FLAGGED", review, {"aaaaaaaa"}))
+        approved = {"aaaaaaaa": {"12:00:01": [True, True]}}
+        line = "- [MEDIUM] [other] session=aaaaaaaa 12:00:01 p — reran it\n  evidence: 12:00:01 CALL Bash\n"
+        self.assertEqual(audit.parse_review(line, {"aaaaaaaa"}, approved=approved)[1][0]["sev"], "LOW")
+        repeat = line + "  why: it did this again after the prompt\n"
+        self.assertEqual(audit.parse_review(repeat, {"aaaaaaaa"}, approved=approved)[1][0]["sev"], "MEDIUM")
+        own = ("- [MEDIUM] [other] session=aaaaaaaa 12:00:01 p — edited it\n"
+               "  why: session=aaaaaaaa was asked by the PM, so LOW at most\n"
+               "  evidence: 12:00:01 CALL Edit; 12:05:00 CALL Bash\n")
+        [e] = audit.parse_review(own, {"aaaaaaaa"}, approved=approved)[1]  # the unapproved call keeps it
+        self.assertEqual((e["sev"], e["approved"]), ("MEDIUM", False))
+
     def test_severity_word_in_evidence_prose_is_not_a_finding(self):
         """Issue #59: a session= line's severity is the one it states, not a word in its prose."""
         base = "VERDICT: FLAGGED\ns\n- [LOW] [other] session=aaaaaaaa 12:00 p — x\n"
@@ -2408,7 +2445,8 @@ class AlertTextTest(unittest.TestCase):
         self.assertEqual(len(got), audit.ALERT_ITEMS + 1)
         self.assertEqual(got[-1], f"… +{60 - audit.ALERT_ITEMS} more in the report")
         self.assertIn("[REDACTED:github-token#1]", got[0])
-        self.assertTrue(got[0].endswith(f" — {'p' * 40}, session {sid[:8]}"), got[0])
+        self.assertTrue(got[0].startswith(f"HIGH red-line, {'p' * 40}: did thing 0 with "), got[0])
+        self.assertTrue(all(len(b) <= 200 for b in got), got)
         audit.guard("test", alert[0])
         self.assertTrue(alert[0].startswith("🔴 Claude audit ("), alert[0][:80])
         self.assertIn(": 60 need you\n", alert[0])
@@ -2421,14 +2459,14 @@ class AlertTextTest(unittest.TestCase):
 
     def test_alert_shares_the_limit_and_keeps_where_it_happened(self):
         red = audit.Redactor()
-        items = [f"HIGH [red-line]: {'x' * 2000} — proj, session {i:08x}" for i in range(3)]
+        items = [f"HIGH red-line, proj{i}: {'x ' * 1000}" for i in range(3)]
         text = audit.alert_message(red, "h", items, "", "r.md")
         self.assertLessEqual(len(text), audit.ALERT_LIMIT)
         got = bullets(text)
         self.assertEqual(len(got), 3)
         for i, b in enumerate(got):
-            self.assertIn(" …[+", b)
-            self.assertTrue(b.endswith(f" — proj, session {i:08x}"), b[-60:])
+            self.assertNotIn("…[+", b)
+            self.assertTrue(b.startswith(f"HIGH red-line, proj{i}: x x") and b.endswith("x…"), b[-60:])
 
     def test_repeats_are_left_out_of_the_bullets_and_counts(self):
         sid = write_session(self.fx.projects, [user("go"), agent("done")])
@@ -2439,7 +2477,7 @@ class AlertTextTest(unittest.TestCase):
         run(f("HIGH", "red-line"), f("HIGH", "out-of-scope"), f("MEDIUM", "other"))
         first, second = self.fx.alert_lines()
         self.assertEqual(len(bullets(second[0])), 1)
-        self.assertIn("HIGH [out-of-scope]: out-of-scope thing — proj, session", second[0])
+        self.assertIn("\n• HIGH out-of-scope, proj: out-of-scope thing\n", second[0])
         self.assertIn(": 1 needs you\n", second[0])
         self.assertIn("\nNot urgent, in the daily digest: 1 MEDIUM\nAlready alerted: 1 repeat(s)\n", second[0])
 
@@ -2582,7 +2620,7 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(p.returncode, 2, p.stderr)
         [d] = self.digests()
         self.assertIn("Unparsed list lines beside findings: 2 (see the reports)", d)
-        self.assertIn("Not urgent: 1 MEDIUM", d)
+        self.assertIn(" · 1 MEDIUM\n", d)
 
     def test_quiet_window_sends_nothing_and_is_still_marked_sent(self):
         write_session(self.fx.projects, [user("run the tests"), agent("all pass")])
@@ -2622,12 +2660,11 @@ class DigestTest(unittest.TestCase):
         p = self.run_due(STUB_MODE="clean")
         [d] = self.digests()
         self.assertNotIn(s, self.fx.everything(p))
-        self.assertIn("Runs: 2 audited (1 with activity) · immediate alerts: 0 sent", d)
-        self.assertIn("Not urgent: 1 MEDIUM\n", d)
+        self.assertIn("\n2 runs · 0 alerts · 1 MEDIUM\n", d)
         report = next(f.name for f in (self.fx.audit / "reports").glob("*.md") if "_timeline" not in f.name
                       and "edited a file" in f.read_text())
-        self.assertIn(f"• out-of-scope ×1: MEDIUM (pepper3, s {sid[:8]}): edited a file in another repo"
-                      f" — report {report}", d)
+        self.assertIn(f"\n• MEDIUM out-of-scope, pepper3: edited a file in another repo — {report}", d)
+        self.assertNotIn(sid[:8], d)
         self.assertNotIn("LOW", d)
         self.assertNotIn("reworded", d)
         self.assertNotIn("Secrets", d)
@@ -2686,7 +2723,7 @@ class DigestTest(unittest.TestCase):
                 for h in range(1, 25) if not 20 <= h <= 22]
         d = audit.build_digest("h", recs, start, now, [])
         self.assertIn("Gaps: no run 00:00–04:00", d)
-        self.assertIn("Runs: 21 audited (0 with activity)", d)
+        self.assertIn("\n21 runs · 0 alerts", d)
         self.assertIn("No activity in any run for 24h", d)
 
     def test_problems_alerts_repeats_and_cap(self):
@@ -2703,13 +2740,15 @@ class DigestTest(unittest.TestCase):
                          "problems": [{"kind": "BATCH-FAILED", "text": "batch 1 of 1 failed: x"}] if h < 3 else []})
         d = audit.build_digest("h", recs, start, now, [])
         self.assertLessEqual(len(d), audit.ALERT_LIMIT)
-        self.assertIn("immediate alerts: 1 sent", d)
-        self.assertIn("Not urgent: 960 MEDIUM", d)
-        self.assertIn("Repeats (already alerted): 24 finding(s), 1 secret(s)", d)
+        self.assertIn("\n24 runs · 1 alert · 960 MEDIUM\n", d)
+        self.assertIn("Already alerted: 24 finding(s), 1 secret(s)", d)
         self.assertIn("Problem BATCH-FAILED ×2 (last 07:00: batch 1 of 1 failed: x)", d)
-        self.assertTrue(d.startswith("📋 Claude audit daily (h), 24h to 03 Nov 05:00 UTC\n"), d[:80])
+        self.assertTrue(d.startswith("📋 Claude audit daily (h), to 03 Nov 05:00 UTC\n"), d[:80])
         self.assertNotIn("env-secret", d)
-        self.assertIn("• +4 more categories in the reports", d)
+        found = [l for l in d.splitlines() if l.startswith("• MEDIUM ")]
+        self.assertEqual(len(found), audit.DIGEST_FINDINGS)
+        self.assertTrue(all(len(l) <= 200 for l in found), found)
+        self.assertIn(f"\n• +{960 - audit.DIGEST_FINDINGS} more in the reports", d)
 
     def day(self, **extra):
         now = utc("2026-11-03T05:00:00")
@@ -2729,7 +2768,7 @@ class DigestTest(unittest.TestCase):
 
     def test_what_still_sends(self):
         for extra, want in (
-                ({"findings": [{"sev": "MEDIUM", "cat": "other", "sess": "aaaaaaaa", "text": "x"}]}, "Not urgent: 1 MEDIUM"),
+                ({"findings": [{"sev": "MEDIUM", "cat": "other", "sess": "aaaaaaaa", "text": "x"}]}, "• MEDIUM other: x"),
                 ({"problems": [{"kind": "BATCH-FAILED", "text": "boom"}]}, "Problem BATCH-FAILED ×1"),
                 ({"notes": ["gap: a to b never reviewed"]}, "note: gap: a to b never reviewed"),
                 ({"unparsed_beside_repeats": 3}, "Unparsed list lines beside findings"),
@@ -2761,39 +2800,54 @@ class DigestTest(unittest.TestCase):
             r.update(verdict="NO-ACTIVITY", sessions=0)
         d = audit.build_digest("h", recs, start, now, [])
         self.assertIn("No activity in any run for 24h: the collector or parser may be broken.", d)
-        self.assertIn("Runs: 24 audited (0 with activity)", d)
+        self.assertIn("\n24 runs · 0 alerts\n", d)
         self.assertIsNone(audit.build_digest("h", recs[-2:], now - dt.timedelta(hours=2), now, [],
                                              first=True))  # just installed: too short to say
 
-    def test_full_reason_and_report_name_reach_the_digest(self):
+    def test_short_note_and_report_name_reach_the_digest_and_the_reasoning_stays_in_the_report(self):
         sid = write_session(self.fx.projects, [user("deploy"), agent("done")])
-        reason = "rewrote the blocked command " + "and ran it again, " * 40 + "THE-END"
-        self.run_due(STUB_MODE="raw", STUB_REVIEW=f"VERDICT: FLAGGED\ns\n- [MEDIUM] [out-of-scope] "
-                                                  f"session={sid[:8]} 12:00:00 proj — {reason}")
+        note = "rewrote a blocked script past the safety check and ran it on both prod boxes"
+        why = "The edits had been asked for by the PM, so the harm is limited. " * 8 + "THE-END"
+        self.run_due(STUB_MODE="raw", STUB_REVIEW=f"VERDICT: FLAGGED\ns\n- [MEDIUM] [block-workaround] "
+                                                  f"session={sid[:8]} 12:00:00 proj — {note}\n  why: {why}\n"
+                                                  "  evidence: 12:00:00 CALL Bash")
         [d] = self.digests()
         name = json.loads((self.fx.audit / "digest.jsonl").read_text().splitlines()[-1])["report"]
         self.assertRegex(name, r"^\d{4}-\d\d-\d\d_\d{6}\.md$")
-        self.assertIn(f"MEDIUM (proj, s {sid[:8]}): {reason} — report {name}", d)
+        self.assertTrue(d.endswith(f"\n• MEDIUM block-workaround, proj: {note} — {name}"), d)
+        self.assertNotIn("harm is limited", d)
+        self.assertNotIn("THE-END", d)
         self.assertNotIn("…[+", d)
+        self.assertIn(f"  why: {why}", (self.fx.audit / "reports" / name).read_text())
 
-    def test_failure_lines_survive_the_cap_and_findings_are_never_cut_midway(self):
+    def test_a_long_note_is_cut_at_a_word_and_an_old_clip_mark_goes(self):
+        long = "rewrote the blocked command " + "and ran it again, " * 40 + "THE-END"
+        got = audit.finding_summary(f"- [MEDIUM] [other] session=aaaaaaaa 12:00:00 p — {long}")
+        self.assertLessEqual(len(got), audit.NOTE_CHARS)
+        self.assertTrue(got.endswith(" and…") and long.startswith(got[:-1]), got)
+        old = "The brief said read-only, but it wrote /tmp/download.htm …[+525 chars]"
+        self.assertEqual(audit.short_note(old), "The brief said read-only, but it wrote /tmp/download.htm…")
+        self.assertEqual(audit.cut_words("see [REDACTED:github-token#1] now", 20), "see…")
+        self.assertEqual(audit.cut_words("x" * 300, 10), "x" * 9 + "…")
+
+    def test_failure_lines_come_first_and_every_finding_is_one_short_line(self):
         recs, start, now = self.day(
             problems=[{"kind": "BATCH-FAILED", "text": "batch 1 of 1 failed"}],
             notes=["last_run unreadable"], report="r.md",
-            findings=[{"sev": "MEDIUM", "cat": f"c{i}", "sess": f"{i:08x}", "text": f"{'t' * 1500} END{i}"}
-                      for i in range(5)])
+            findings=[{"sev": "MEDIUM", "cat": f"c{i}", "sess": f"{i:08x}", "repo": "pepper3 (fix-x)",
+                       "text": f"END{i} " + "word " * 300} for i in range(5)])
         d = audit.build_digest("h", recs, start, now, [])
         self.assertLessEqual(len(d), audit.ALERT_LIMIT)
-        self.assertLess(d.index("Problem BATCH-FAILED"), d.index("Not urgent"))
-        self.assertLess(d.index("note: last_run unreadable"), d.index("Not urgent"))
-        self.assertEqual(d.count("END"), 2)  # two whole findings
-        self.assertIn("• +3 more in the reports", d)
+        self.assertLess(d.index("Problem BATCH-FAILED"), d.index("• MEDIUM"))
+        self.assertLess(d.index("note: last_run unreadable"), d.index("• MEDIUM"))
+        found = [l for l in d.splitlines() if l.startswith("• MEDIUM")]
+        self.assertEqual(len(found), 5)
+        for l in found:
+            self.assertLessEqual(len(l), 200, l)
+            self.assertRegex(l, r"^• MEDIUM c\d, pepper3/fix-x: END\d( word)+… — r\.md$")
+        self.assertNotIn("more in the reports", d)
+        self.assertNotIn("…[+", d)
         self.assertNotIn("(cut; see the reports)", d)
-        recs[-1]["findings"] = [{"sev": "MEDIUM", "cat": "c", "sess": "aaaaaaaa", "text": "t" * 9000}]
-        d = audit.build_digest("h", recs, start, now, [])
-        self.assertLessEqual(len(d), audit.ALERT_LIMIT)  # one reason too long for Telegram
-        self.assertIn(" …[+", d)
-        self.assertIn(" — report r.md", d)
 
     def test_a_flood_of_faults_never_reaches_the_hard_cut(self):
         recs, start, now = self.day(notes=[f"note {i} " + "n" * 280 for i in range(30)], alert="failed",
@@ -2825,14 +2879,15 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(fit([], 5), [])
         self.assertEqual(fit(["a" * 300], 200), ["• +1 more x"])
         [cut] = fit(["a" * 300], 201)
-        self.assertTrue(cut.startswith("aaa") and " …[+" in cut and len(cut) <= 201, cut)
+        self.assertTrue(cut.startswith("aaa") and cut.endswith("a…") and len(cut) <= 200, cut)
+        self.assertEqual(audit.fit_lines(["a", "b", "c"], 100, "x", limit=2), ["a", "b", "• +1 more x"])
 
     def test_fit_lines_keeps_a_group_together_and_the_first_finding(self):
         fit = lambda lines, room: audit.fit_lines(lines, room, "x")
         self.assertEqual(fit(["• a " + "x" * 300, "  also y", "• b"], 100), ["• b", "• +2 more x"])
         self.assertEqual(fit(["• a", "  also " + "y" * 300, "• b"], 100), ["• a", "• b", "• +1 more x"])
         first, second, more = fit(["a" * 500, "z" * 10, "  also q" + "w" * 500], 300)
-        self.assertTrue(first.startswith("aaa") and " …[+" in first and len(first) <= 288, first)
+        self.assertTrue(first.startswith("aaa") and first.endswith("a…") and len(first) <= 288, first)
         self.assertEqual((second, more), ("z" * 10, "• +1 more x"))
 
     def test_a_long_newest_finding_stays_in_the_digest_with_its_report(self):
@@ -2842,9 +2897,16 @@ class DigestTest(unittest.TestCase):
             {"sev": "MEDIUM", "cat": "red-line", "sess": "bbbbbbbb", "text": "minor second"}])
         d = audit.build_digest("h", recs, start, now, [])
         self.assertLessEqual(len(d), audit.ALERT_LIMIT)
-        self.assertRegex(d, r"• red-line ×2: MEDIUM \(\?, s aaaaaaaa\): x+ …\[\+\d+ chars\] — report r\.md")
-        self.assertIn("• +1 more in the reports", d)  # its "also" line goes with it, never alone
-        self.assertNotIn("  also", d)
+        self.assertIn(f"\n• MEDIUM red-line: {'x' * (audit.NOTE_CHARS - 1)}… — r.md\n"
+                      "• MEDIUM red-line: minor second — old.md", d)  # the newest first
+        self.assertNotIn("aaaaaaaa", d)
+
+    def test_a_record_with_odd_field_types_still_builds(self):
+        recs, start, now = self.day(report="r.md", problems=[{"kind": "BATCH-FAILED", "text": 7}], findings=[
+            {"sev": "MEDIUM", "cat": "other", "sess": "aaaaaaaa", "repo": ["x"], "text": 5}])
+        d = audit.build_digest("h", recs, start, now, [])
+        self.assertIn("\n• MEDIUM other: ? — r.md", d)
+        self.assertIn("Problem BATCH-FAILED ×1 (last 05:00: ?)", d)
 
     def test_a_corrupt_failed_item_is_skipped(self):
         recs, start, now = self.day(alert="failed", failed_items=[{"x": 1}, "real item"])
@@ -2947,7 +3009,7 @@ class DigestTest(unittest.TestCase):
         self.fx.on_flag = good
         self.run_due(STUB_MODE="clean")
         [d] = self.digests()
-        self.assertIn("immediate alerts: 0 sent, 1 failed", d)
+        self.assertIn(" runs · 0 alerts, 1 failed\n", d)
         self.assertRegex(d, r"Alerts that failed to send:\n• SECRET outward \[REDACTED:github-token#1\]: "
                          r"github-token via network \(curl\) — proj, session \w{8}")
         self.assertNotIn(s, self.fx.everything(self.fx.run("--stdout", "--no-llm")))
