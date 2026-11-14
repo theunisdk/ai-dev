@@ -166,26 +166,27 @@ status --short`, and any spec or plan doc. A hold does not stop the clock.
 For a worker on hold or waiting on the user, first ask whether the feature still needs what it
 waits for. If not, release it (tell it to go on without it) or cut it, and say so in one line. A
 release or cut that drops work the quoted ask names is his call: escalate it instead.
-Then, for every worker, held or not, ask: (a) is it past its expected time? (b) is it building
+A worker that reported and awaits GO goes to Step 5 now, not to him for (a).
+Then, for every other worker, held or not, ask: (a) is it past its expected time? (b) is it building
 something the user's words don't name? Compare with the quoted ask, not your breakdown: the
 breakdown can be where the bloat starts. (c) would the user look at this and say it isn't what he
-asked for? A worker you cut in this run skips (a)-(c). Any yes: message him at once
-with the numbers and your recommendation (cut, ship what exists, or continue) and why. An escalated
-cut and any yes for the same worker go in one message. After a "continue", or once flagged, message
-him about that worker only when something is new.
-A worker that reported and awaits GO goes to Step 5 now, not to him for (a).
+asked for? A worker you cut in this run skips (a)-(c). Any yes: message him at once with the
+numbers and your recommendation (cut, ship what exists, or continue) and why. An escalated release
+or cut and any yes for the same worker go in one message. After a "continue", or once flagged or
+escalated, message him about that worker only when something is new.
 
 Then check yourself. Go through your own messages since the last run (first run: since he approved
-the breakdown), and every side thread still open from an earlier run. Take each side thread that is
-not in the approved breakdown: question rounds or options sent to the user, requests to sessions
-that are not your workers, your own tests or lookups. Judge each thread once, as a whole, against
-the quoted ask, not the breakdown, and give it one action. A thread that holds a question to the
-user outside the five Step 4 escalation categories is a spiral; options sent to him count as a
-question. Stop asking, decide it yourself or drop it, and say so in one line. Any other thread not
-needed: drop it and say so in one line. Any other thread needed but growing (more than one round, or
-still open from an earlier run): message him at once with the numbers (rounds, and time since it
-began) and your recommendation, as for a worker; once flagged, only when something is new. On the
-first run after a compaction, say you may not see every message.
+the breakdown), and every side thread still open from an earlier run. A side thread is everything
+you did about one matter outside the approved breakdown: question rounds or options sent to the
+user, requests to sessions that are not your workers, your own tests or lookups. Judge each thread
+once, as a whole, against the quoted ask, not the breakdown, and give it one action. A thread that
+holds a question to the user outside the five Step 4 escalation categories is a spiral; options sent
+to him count as a question. Stop asking, decide it yourself or drop it, and say so in one line. Any
+other thread not needed: drop it and say so in one line. Any other thread needed but growing (more
+than one round, or still open from an earlier run): message him at once with the numbers (rounds,
+and time since it began) and your recommendation, as for a worker. Once a thread has its line or
+message, raise it again only when something is new. On the first run after a compaction, say you
+may not see every message.
 
 Nothing found: add nothing beyond the State line. A signal you can't read is not a no: say which
 one, for which worker or for yourself.
@@ -383,7 +384,7 @@ can see in the conversation; if you can't tell whether the user gave go, ask.
 | "The deploy exited 0, it's live" | Exit 0 means the command finished. Read a response from the target. |
 | "I'll forward this so he has the full context" | Forwarding is not filtering. Decide, then send a recommendation. |
 | "The worker disagrees with the brief — ask the user" | Read its reasoning. If it's right, re-brief. Your call. |
-| "It's on hold, so it costs nothing" | Its clock still runs. Judge it like a working worker; release or cut it if the feature no longer needs what it waits for. A release or cut of work his words name is his call. |
+| "It's on hold, so it costs nothing" | Its clock still runs. Judge it like a working worker; release or cut it if the feature no longer needs what it waits for. A release or cut that drops work his words name is his call. |
 | "My own questions aren't scope" | Your question rounds, options, side requests and lookups are scope too. Judge each side thread once, as a whole, against the quoted ask. |
 | "Faster to spawn a session for this lookup" | A subagent is cheaper. Spawn for real tasks. |
 | "Merged, but the issue stays open until the deploy is verified" | Merged is done. Close it with `Done in #<pr>.`; only an issue the PR covered in part stays open. |
