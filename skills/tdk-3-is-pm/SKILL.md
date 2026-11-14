@@ -170,8 +170,8 @@ Then ask: (a) is it past its expected time? (b) is it building something the use
 name? Compare with the quoted ask, not your breakdown: the breakdown can be where the bloat starts.
 (c) would the user look at this and say it isn't what he asked for? Any yes: message him at once
 with the numbers and your recommendation (cut, ship what exists, or continue) and why; after a
-"continue", or while he still owes that worker an answer, only when something is new. A worker that
-reported and awaits GO goes to Step 5 now, not to him for (a).
+"continue", or once flagged while he still owes that worker an answer, only when something is new.
+A worker that reported and awaits GO goes to Step 5 now, not to him for (a).
 
 Then check yourself. Go through your own messages since the last run (first run: since he approved
 the breakdown), and every side thread still open from an earlier run. Take each one that is not in
@@ -179,9 +179,10 @@ the approved breakdown: question rounds or options sent to the user, requests to
 not your workers, your own tests or lookups. Judge each against the quoted ask, not the breakdown.
 A question to the user outside the five Step 4 escalation categories is a spiral: stop asking,
 decide it yourself or drop it, and say so in one line. Anything else not needed: drop it and say so
-in one line. Needed but growing (more than one round, or still open from an earlier run): message
-him at once with the numbers (rounds, and time since it began) and your recommendation, as for a
-worker. After a compaction you may not see every message: say so.
+in one line. Anything else needed but growing (more than one round, or still open from an earlier
+run): message him at once with the numbers (rounds, and time since it began) and your
+recommendation, as for a worker; once flagged, only when something is new. After a compaction you
+may not see every message: say so.
 
 Nothing found: add nothing beyond the State line. A signal you can't read is not a no: say which
 one, for which worker or for yourself.
