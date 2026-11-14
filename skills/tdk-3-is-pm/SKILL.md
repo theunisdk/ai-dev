@@ -157,9 +157,9 @@ question it never sent, or sitting at a permission prompt only the user can answ
 
 ## Proportion check
 
-The hourly job (Step 2) runs this. For each task worker still working (not reported, not waiting on
-the user), read the elapsed time since its first `[YYYY-MM-DD HH:MM:SS] <name> started` line in
-`~/.claude-rc.log`; the quoted ask and `EXPECTED` in its brief,
+The hourly job (Step 2) runs this. For each task worker not yet merged, including one on hold or
+waiting on the user, read the elapsed time since its first `[YYYY-MM-DD HH:MM:SS] <name> started`
+line in `~/.claude-rc.log`; the quoted ask and `EXPECTED` in its brief,
 `~/.local/state/claude-sessions/<name>.md` (or a newer time the user set); and what it builds:
 `git -C <repo> diff --stat origin/main...feat/<task>`, `git -C <repo>/.claude/worktrees/<task>
 status --short`, and any spec or plan doc.
@@ -167,8 +167,18 @@ Then ask: (a) is it past its expected time? (b) is it building something the use
 name? Compare with the quoted ask, not your breakdown: the breakdown can be where the bloat starts.
 (c) would the user look at this and say it isn't what he asked for? Any yes: message him at once
 with the numbers and your recommendation (cut, ship what exists, or continue) and why; after a
-"continue", only when something is new. All no: add nothing beyond the State line. A signal you
-can't read is not a no: say which one, for which worker.
+"continue", only when something is new. A hold does not stop the clock: (a) counts it. For a worker
+on hold or waiting on the user, also ask whether the build still needs what it waits for. If not,
+release or cut it and say so in one line.
+
+Then check yourself. List what you did since the last run that is not in the approved breakdown:
+question rounds or options sent to the user, requests to other sessions, your own tests or lookups.
+Judge each against the quoted ask, not the breakdown. A question to the user outside the five Step 4
+escalation categories is a spiral. Not needed: drop it and say so in one line. Needed but growing:
+message him at once with the numbers and your recommendation, as for a worker.
+
+Nothing found: add nothing beyond the State line. A signal you can't read is not a no: say which
+one, for which worker or for yourself.
 
 ## Step 5 — Decide the merge (only you send GO)
 
@@ -363,6 +373,8 @@ can see in the conversation; if you can't tell whether the user gave go, ask.
 | "The deploy exited 0, it's live" | Exit 0 means the command finished. Read a response from the target. |
 | "I'll forward this so he has the full context" | Forwarding is not filtering. Decide, then send a recommendation. |
 | "The worker disagrees with the brief — ask the user" | Read its reasoning. If it's right, re-brief. Your call. |
+| "It's on hold, so it costs nothing" | Its clock still runs. Judge it like a working worker, and cut it if the build no longer needs what it waits for. |
+| "My own questions aren't scope" | Your question rounds, side requests and lookups are scope too. Judge each against the quoted ask. |
 | "Faster to spawn a session for this lookup" | A subagent is cheaper. Spawn for real tasks. |
 | "Merged, but the issue stays open until the deploy is verified" | Merged is done. Close it with `Done in #<pr>.`; only an issue the PR covered in part stays open. |
 | "Everything merged, I'm done" | Not until the sweep is clean and the first line says `✅ DONE — safe to close`. |
