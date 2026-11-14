@@ -170,7 +170,8 @@ Then, for every worker, held or not, ask: (a) is it past its expected time? (b) 
 something the user's words don't name? Compare with the quoted ask, not your breakdown: the
 breakdown can be where the bloat starts. (c) would the user look at this and say it isn't what he
 asked for? A worker you cut in this run skips (a)-(c). A worker that reported and awaits GO skips
-(a) and goes to Step 5 now. Any yes: message him at once with the numbers and your recommendation
+(a). With no yes on (b) or (c), it goes to Step 5 now; with a yes, hold its GO until he answers.
+Any yes: message him at once with the numbers and your recommendation
 (cut, ship what exists, or continue) and why. An escalated release or cut and any yes for the same
 worker go in one message. After a "continue", or once flagged or escalated, message him about that
 worker only when something is new.
@@ -236,6 +237,8 @@ Send GO only when **all** of these hold:
 - any review object you rely on as evidence is on the head SHA. A verdict on an older commit says
   nothing about what you are about to merge. Older review objects are history and fail nothing: a
   clean incremental pass on the head leaves `Review completed` and no new review object.
+- no cut, ship or continue recommendation from the Proportion check awaits his answer for this
+  worker.
 - the PR closes no issue on merge:
   `gh pr view <n> -R <owner/repo> --json closingIssuesReferences -q '.closingIssuesReferences|length'`
   prints `0`. Otherwise send it back to link them with `Refs`.
