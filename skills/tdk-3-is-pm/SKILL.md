@@ -166,14 +166,14 @@ status --short`, and any spec or plan doc. A hold does not stop the clock.
 For a worker on hold or waiting on the user, first ask whether the feature still needs what it
 waits for. If not, release it (tell it to go on without it) or cut it, and say so in one line. A
 release or cut that drops work the quoted ask names is his call: escalate it instead.
-A worker that reported and awaits GO goes to Step 5 now, not to him for (a).
-Then, for every other worker, held or not, ask: (a) is it past its expected time? (b) is it building
+Then, for every worker, held or not, ask: (a) is it past its expected time? (b) is it building
 something the user's words don't name? Compare with the quoted ask, not your breakdown: the
 breakdown can be where the bloat starts. (c) would the user look at this and say it isn't what he
-asked for? A worker you cut in this run skips (a)-(c). Any yes: message him at once with the
-numbers and your recommendation (cut, ship what exists, or continue) and why. An escalated release
-or cut and any yes for the same worker go in one message. After a "continue", or once flagged or
-escalated, message him about that worker only when something is new.
+asked for? A worker you cut in this run skips (a)-(c). A worker that reported and awaits GO skips
+(a) and goes to Step 5 now. Any yes: message him at once with the numbers and your recommendation
+(cut, ship what exists, or continue) and why. An escalated release or cut and any yes for the same
+worker go in one message. After a "continue", or once flagged or escalated, message him about that
+worker only when something is new.
 
 Then check yourself. Go through your own messages since the last run (first run: since he approved
 the breakdown), and every side thread still open from an earlier run. A side thread is everything
