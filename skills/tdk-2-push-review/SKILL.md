@@ -249,12 +249,12 @@ n="$(set -o pipefail
           for (i = 2; i <= k; i++) if (index(a[i], "\"author\":\"rejected\"") && (index(a[i], "\"local_id\":null") || !index(a[i], "\"local_id\":"))) print f, i }' "$f" || exit 1 ;;
       (*) awk -v f="$b" 'NR == 1 && split($0, h, " — ") == 4 && h[1] ~ /^# (Review|Spec) verdict$/ { f = h[1] " " h[2] }
           /^\|/ { t = 1; n = split($0, c, "|"); for (i = 2; i < n; i++) gsub(/^ +| +$/, "", c[i]) }
-          c[2] == "ID" { fc = fl = 0; for (i = 3; i < n; i++) { if (c[i] == "Finding") fc = i; if (c[i] ~ /^(File|Where)/) fl = i } }
-          /^\|.*\| *REJECT/ { x = c[fl]; sub(/:[0-9]+.*$/, "", x); r[tolower(c[2])] = 1; k = ""
+          c[2] == "ID" { tb++; fc = fl = 0; for (i = 3; i < n; i++) { if (c[i] == "Finding") fc = i; if (c[i] ~ /^(File|Where)/) fl = i } }
+          /^\|.*\| *REJECT/ { x = c[fl]; sub(/:[0-9]+.*$/, "", x); k = ""
             if (fc) for (j = fc + 1; j < n; j++) if (c[j] ~ /^REJECT/) { k = x " " c[fc]; for (i = fc + 1; i < j; i++) k = k "|" c[i]; break }
-            if (k == "") print f, $0
-            else if (match(tolower(c[fc]), /^(the )?same as [a-z0-9-]+/)) { y = substr(tolower(c[fc]), RSTART, RLENGTH); sub(/.* /, "", y); d[++m] = y; e[m] = k }
-            else print f, k }
+            if (k == "") { print f, $0; r[tb, tolower(c[2])] = 1 }
+            else if (match(tolower(c[fc]), /^(the )?same as [a-z0-9-]+/)) { y = substr(tolower(c[fc]), RSTART, RLENGTH); sub(/.* /, "", y); d[++m] = tb SUBSEP y; e[m] = k }
+            else { print f, k; r[tb, tolower(c[2])] = 1 } }
           match($0, /[0-9]+ rejected/) { s += substr($0, RSTART, RLENGTH); g = 1 }
           END { if (!t && !g) exit 3; if (!t) for (i = 1; i <= s; i++) print f, i; for (i = 1; i <= m; i++) if (!(d[i] in r)) print f, e[i] }' "$f" || exit 1 ;;
     esac
