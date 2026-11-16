@@ -227,11 +227,11 @@ Only on `run`, invoke `/review-postmortem <PR> --record-only`. Always pass `--re
 
 **Every outcome continues to Step 5**, `failed` included. Copy the first line, and the record line when there is one, verbatim into the Step 5 summary. Never drop a `failed` line or call it clean. After a Step 1b `subagent` line expect `skipped`; after `fallback`, `no-local-verdict` or a score against an older verdict. The Step 1b line is the cause.
 
-Then, whatever the postmortem printed, check whether `/review-tune` is due. **Due** = at least 10 rejected findings in the clone's `review-history/` since the last tune: `REJECT` rows in archived verdicts (a verdict re-adjudicated on the same commit counts once), plus CodeRabbit findings a postmortem record marks `"author": "rejected"` with no `local_id`. The last tune is the mtime of `review-history/tune-last`, which `/review-tune` touches after every complete run, even one that changes nothing. With no marker it is the last commit on any branch touching `.review/learnings.md` (never committed: count everything). A record rewritten after the last tune counts only if its PR merged after it. Flag it; never run tune yourself.
+Then, whatever the postmortem printed, check whether `/review-tune` is due. **Due** = at least 10 rejected findings in the clone's `review-history/` since the last tune, each counted once: a `REJECT` row in an archived verdict, keyed by the verdict's mode and branch and the row's file and finding (a verdict with no table counts its summary's `N rejected`), plus each CodeRabbit finding a postmortem record marks `"author": "rejected"` with no `local_id`. The last tune is the mtime of `review-history/tune-last`, which `/review-tune` touches after every complete run, even one that changes nothing. With no marker it is the last commit on any branch touching `.review/learnings.md` (never committed: count everything). A record rewritten after the last tune counts again unless its PR merged before the tune. Flag it; never run tune yourself.
 ```bash
 n="$(set -o pipefail
   hist="$(git rev-parse --path-format=absolute --git-common-dir)/review-history" || exit 1
-  [ -d "$hist" ] || { echo 0; exit 0; }
+  [ -e "$hist" ] || { echo 0; exit 0; }; [ -d "$hist" ] || exit 1
   tmp="$(mktemp -d)" || exit 1; trap 'rm -rf "$tmp"' EXIT
   if [ -e "$hist/tune-last" ]; then touch -r "$hist/tune-last" "$tmp/ref" || exit 1
   else stamp="$(git log -1 --all --date=format-local:%Y%m%d%H%M.%S --format=%cd -- ':/.review/learnings.md')" || exit 1
@@ -239,20 +239,22 @@ n="$(set -o pipefail
   git log --all --date=format-local:%Y%m%d%H%M.%S --format='%cd %s' | awk '{
     if (match($0, /\(#[0-9]+\)$/)) p = substr($0, RSTART + 2, RLENGTH - 3)
     else if ($2 $3 $4 == "Mergepullrequest" && $5 ~ /^#[0-9]+$/) p = substr($5, 2); else next
-    if (!(p in d)) { d[p] = 1; print p, $1 } }' > "$tmp/merged" || exit 1
+    d[p] = $1 } END { for (p in d) print p, d[p] }' > "$tmp/merged" || exit 1
   find "$hist" -maxdepth 1 -newer "$tmp/ref" \( -name 'code-*.md' -o -name 'spec-*.md' -o -name 'postmortem-pr*.md' \) > "$tmp/new" || exit 1
   while IFS= read -r f; do b="${f##*/}"
     case "$b" in
       (postmortem-pr*) pr="${b#postmortem-pr}"; d="$(awk -v p="${pr%.md}" '$1 == p { print $2; exit }' "$tmp/merged")" || exit 1
         if [ -n "$d" ]; then touch -t "$d" "$tmp/pr" || exit 1; [ "$tmp/pr" -nt "$tmp/ref" ] || continue; fi
-        c="$(awk '{ s = s $0 } END { if (!index(s, "review-postmortem/v1")) exit 3; gsub(/" *: */, "\":", s); k = split(s, a, /\{"url"/)
-          for (i = 2; i <= k; i++) if (index(a[i], "\"author\":\"rejected\"") && index(a[i], "\"local_id\":null")) r++
-          print r + 0 }' "$f")" || exit 1 ;;
-      (*) c="$(awk '/^\|/ { t = 1 } /^\|.*\| *REJECT/ { r++ } match($0, /[0-9]+ rejected/) { s += substr($0, RSTART, RLENGTH); f = 1 }
-          END { if (!t && !f) exit 3; print t ? r + 0 : s }' "$f")" || exit 1 ;;
-    esac; echo "$b $c"
-  done < "$tmp/new" | awk '{ k = $1; if (k !~ /-unparsed-/) sub(/-[0-9]+\.md$/, "", k); if ($2 > m[k]) m[k] = $2 }
-    END { for (k in m) s += m[k]; print s + 0 }')"
+        awk -v f="$b" '{ s = s " " $0 } END { if (!index(s, "review-postmortem/v1")) exit 3; gsub(/[ \t]*:[ \t]*/, ":", s); k = split(s, a, /"url":/)
+          for (i = 2; i <= k; i++) if (index(a[i], "\"author\":\"rejected\"") && (index(a[i], "\"local_id\":null") || !index(a[i], "\"local_id\":"))) print f, i }' "$f" || exit 1 ;;
+      (*) awk -v f="$b" 'NR == 1 && split($0, h, " — ") == 4 && h[1] ~ /^# (Review|Spec) verdict$/ { f = h[1] " " h[2] }
+          /^\|/ { t = 1; n = split($0, c, "|"); for (i = 2; i < n; i++) gsub(/^ +| +$/, "", c[i]) }
+          c[2] == "ID" { fc = fl = 0; for (i = 3; i < n; i++) { if (c[i] == "Finding") fc = i; if (c[i] ~ /^(File|Where)/) fl = i } }
+          /^\|.*\| *REJECT/ { x = c[fl]; sub(/:[0-9]+.*$/, "", x); print f, (c[fc + 1] ~ /^REJECT/ ? x " " c[fc] : $0) }
+          match($0, /[0-9]+ rejected/) { s += substr($0, RSTART, RLENGTH); g = 1 }
+          END { if (!t && !g) exit 3; if (!t) for (i = 1; i <= s; i++) print f, i }' "$f" || exit 1 ;;
+    esac
+  done < "$tmp/new" | awk '!seen[$0]++ { n++ } END { print n + 0 }')"
 if [ $? -ne 0 ]; then echo "review-tune: unknown — could not count rejected findings since the last tune"
 elif [ "$((n))" -ge 10 ]; then echo "review-tune: due — $((n)) rejected findings since the last tune; run /review-tune"
 else echo "review-tune: not due — $((n)) of 10 rejected findings since the last tune"; fi
