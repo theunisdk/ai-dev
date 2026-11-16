@@ -227,7 +227,7 @@ Only on `run`, invoke `/review-postmortem <PR> --record-only`. Always pass `--re
 
 **Every outcome continues to Step 5**, `failed` included. Copy the first line, and the record line when there is one, verbatim into the Step 5 summary. Never drop a `failed` line or call it clean. After a Step 1b `subagent` line expect `skipped`; after `fallback`, `no-local-verdict` or a score against an older verdict. The Step 1b line is the cause.
 
-Then, whatever the postmortem printed, check whether `/review-tune` is due. **Due** = at least 10 rejected findings in the clone's `review-history/` since the last tune, each counted once: a `REJECT` row in an archived verdict, keyed by the verdict's mode and branch and the row's file and finding (a verdict with no table counts its summary's `N rejected`), plus each CodeRabbit finding a postmortem record marks `"author": "rejected"` with no `local_id`. The last tune is the mtime of `review-history/tune-last`, which `/review-tune` touches after every complete run, even one that changes nothing. With no marker it is the last commit on any branch touching `.review/learnings.md` (never committed: count everything). A record rewritten after the last tune counts again unless its PR merged before the tune. Flag it; never run tune yourself.
+Then, whatever the postmortem printed, check whether `/review-tune` is due. **Due** = at least 10 rejected findings in the clone's `review-history/` since the last tune, each counted once: a `REJECT` row in an archived verdict, keyed by the verdict's mode and branch and the row's file and finding, and skipped when its finding is "Same as" another rejected row of that verdict (a verdict with no table counts its summary's `N rejected`), plus each CodeRabbit finding a postmortem record marks `"author": "rejected"` with no `local_id`. The last tune is the mtime of `review-history/tune-last`, which `/review-tune` touches after every complete run, even one that changes nothing. With no marker it is the last commit on any branch touching `.review/learnings.md` (never committed: count everything). A record rewritten after the last tune counts again unless its PR merged before the tune. Flag it; never run tune yourself.
 ```bash
 n="$(set -o pipefail
   hist="$(git rev-parse --path-format=absolute --git-common-dir)/review-history" || exit 1
@@ -249,10 +249,14 @@ n="$(set -o pipefail
           for (i = 2; i <= k; i++) if (index(a[i], "\"author\":\"rejected\"") && (index(a[i], "\"local_id\":null") || !index(a[i], "\"local_id\":"))) print f, i }' "$f" || exit 1 ;;
       (*) awk -v f="$b" 'NR == 1 && split($0, h, " — ") == 4 && h[1] ~ /^# (Review|Spec) verdict$/ { f = h[1] " " h[2] }
           /^\|/ { t = 1; n = split($0, c, "|"); for (i = 2; i < n; i++) gsub(/^ +| +$/, "", c[i]) }
-          c[2] == "ID" { fc = fl = 0; for (i = 3; i < n; i++) { if (c[i] == "Finding") fc = i; if (c[i] ~ /^(File|Where)/) fl = i } }
-          /^\|.*\| *REJECT/ { x = c[fl]; sub(/:[0-9]+.*$/, "", x); print f, (c[fc + 1] ~ /^REJECT/ ? x " " c[fc] : $0) }
+          c[2] == "ID" { tb++; fc = fl = 0; for (i = 3; i < n; i++) { if (c[i] == "Finding") fc = i; if (c[i] ~ /^(File|Where)/) fl = i } }
+          /^\|.*\| *REJECT/ { x = c[fl]; sub(/:[0-9]+.*$/, "", x); k = ""
+            if (fc) for (j = fc + 1; j < n; j++) if (c[j] ~ /^REJECT/) { k = x " " c[fc]; for (i = fc + 1; i < j; i++) k = k "|" c[i]; break }
+            if (k == "") { print f, $0; r[tb, tolower(c[2])] = 1 }
+            else if (match(tolower(c[fc]), /^(the )?same as [a-z0-9-]+/)) { y = substr(tolower(c[fc]), RSTART, RLENGTH); sub(/.* /, "", y); d[++m] = tb SUBSEP y; e[m] = k }
+            else { print f, k; r[tb, tolower(c[2])] = 1 } }
           match($0, /[0-9]+ rejected/) { s += substr($0, RSTART, RLENGTH); g = 1 }
-          END { if (!t && !g) exit 3; if (!t) for (i = 1; i <= s; i++) print f, i }' "$f" || exit 1 ;;
+          END { if (!t && !g) exit 3; if (!t) for (i = 1; i <= s; i++) print f, i; for (i = 1; i <= m; i++) if (!(d[i] in r)) print f, e[i] }' "$f" || exit 1 ;;
     esac
   done < "$tmp/new" | awk '!seen[$0]++ { n++ } END { print n + 0 }')"
 if [ $? -ne 0 ]; then echo "review-tune: unknown — could not count rejected findings since the last tune"
